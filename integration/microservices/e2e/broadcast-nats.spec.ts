@@ -1,8 +1,7 @@
-import * as express from 'express';
-import * as request from 'supertest';
-import { Test } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { Transport } from '@nestjs/microservices';
+import { Test } from '@nestjs/testing';
+import * as request from 'supertest';
 import { NatsBroadcastController } from '../src/nats/nats-broadcast.controller';
 
 describe('NATS transport', () => {
@@ -14,13 +13,20 @@ describe('NATS transport', () => {
       controllers: [NatsBroadcastController],
     }).compile();
 
-    server = express();
-    app = module.createNestApplication(server);
+    app = module.createNestApplication();
+    server = app.getHttpAdapter().getInstance();
+
     app.connectMicroservice({
       transport: Transport.NATS,
+      options: {
+        url: 'nats://0.0.0.0:4222',
+      },
     });
     app.connectMicroservice({
       transport: Transport.NATS,
+      options: {
+        url: 'nats://0.0.0.0:4222',
+      },
     });
     await app.startAllMicroservicesAsync();
     await app.init();

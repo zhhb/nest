@@ -1,10 +1,10 @@
-import * as io from 'socket.io-client';
-import { expect } from 'chai';
-import { Test, TestingModuleBuilder } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import { expect } from 'chai';
+import * as io from 'socket.io-client';
 import { ApplicationGateway } from '../src/app.gateway';
-import { ServerGateway } from '../src/server.gateway';
 import { NamespaceGateway } from '../src/namespace.gateway';
+import { ServerGateway } from '../src/server.gateway';
 
 async function createNestApp(...gateways): Promise<INestApplication> {
   const testingModule = await Test.createTestingModule({
@@ -15,7 +15,6 @@ async function createNestApp(...gateways): Promise<INestApplication> {
 }
 
 describe('WebSocketGateway', () => {
-  const event = 'push';
   let ws, app;
 
   it(`should handle message (2nd port)`, async () => {
@@ -55,7 +54,7 @@ describe('WebSocketGateway', () => {
     await app.listenAsync(3000);
 
     ws = io.connect('http://localhost:8080');
-    io.connect('http://localhost:8080/test').emit('push', {})
+    io.connect('http://localhost:8080/test').emit('push', {});
     ws.emit('push', {
       test: 'test',
     });

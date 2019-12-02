@@ -1,62 +1,79 @@
-import 'reflect-metadata';
-import iterate from 'iterare';
-import { Controller } from '@nestjs/common/interfaces';
-import { GUARDS_METADATA } from '@nestjs/common/constants';
-import {
-  isUndefined,
-  isFunction,
-  isNil,
-  isEmpty,
-} from '@nestjs/common/utils/shared.utils';
-import { ContextCreator } from './../helpers/context-creator';
-import { NestContainer } from '../injector/container';
 import { CanActivate } from '@nestjs/common';
-import { ConfigurationProvider } from '@nestjs/common/interfaces/configuration-provider.interface';
+import { GUARDS_METADATA } from '@nestjs/common/constants';
+import { Controller } from '@nestjs/common/interfaces';
+import { isEmpty, isFunction } from '@nestjs/common/utils/shared.utils';
+import iterate from 'iterare';
+import { ApplicationConfig } from '../application-config';
+import { ContextCreator } from '../helpers/context-creator';
+import { STATIC_CONTEXT } from '../injector/constants';
+import { NestContainer } from '../injector/container';
+import { InstanceWrapper } from '../injector/instance-wrapper';
 
 export class GuardsContextCreator extends ContextCreator {
   private moduleContext: string;
 
   constructor(
     private readonly container: NestContainer,
-    private readonly config?: ConfigurationProvider,
+    private readonly config?: ApplicationConfig,
   ) {
     super();
   }
 
   public create(
     instance: Controller,
-    callback: (...args) => any,
+    callback: (...args: any[]) => any,
     module: string,
+    contextId = STATIC_CONTEXT,
+    inquirerId?: string,
   ): CanActivate[] {
     this.moduleContext = module;
-    return this.createContext(instance, callback, GUARDS_METADATA);
+    return this.createContext(
+      instance,
+      callback,
+      GUARDS_METADATA,
+      contextId,
+      inquirerId,
+    );
   }
 
   public createConcreteContext<T extends any[], R extends any[]>(
     metadata: T,
+    contextId = STATIC_CONTEXT,
+    inquirerId?: string,
   ): R {
-    if (isUndefined(metadata) || isEmpty(metadata)) {
+    if (isEmpty(metadata)) {
       return [] as R;
     }
     return iterate(metadata)
       .filter((guard: any) => guard && (guard.name || guard.canActivate))
-      .map(guard => this.getGuardInstance(guard))
+      .map(guard => this.getGuardInstance(guard, contextId, inquirerId))
       .filter((guard: CanActivate) => guard && isFunction(guard.canActivate))
       .toArray() as R;
   }
 
-  public getGuardInstance(guard: Function | CanActivate) {
+  public getGuardInstance(
+    guard: Function | CanActivate,
+    contextId = STATIC_CONTEXT,
+    inquirerId?: string,
+  ): CanActivate | null {
     const isObject = (guard as CanActivate).canActivate;
     if (isObject) {
-      return guard;
+      return guard as CanActivate;
     }
     const instanceWrapper = this.getInstanceByMetatype(guard);
-    return instanceWrapper && instanceWrapper.instance
-      ? instanceWrapper.instance
-      : null;
+    if (!instanceWrapper) {
+      return null;
+    }
+    const instanceHost = instanceWrapper.getInstanceByContextId(
+      contextId,
+      inquirerId,
+    );
+    return instanceHost && instanceHost.instance;
   }
 
-  public getInstanceByMetatype(guard): { instance: any } | undefined {
+  public getInstanceByMetatype<T extends Record<string, any>>(
+    guard: T,
+  ): InstanceWrapper | undefined {
     if (!this.moduleContext) {
       return undefined;
     }
@@ -65,13 +82,27 @@ export class GuardsContextCreator extends ContextCreator {
     if (!module) {
       return undefined;
     }
-    return module.injectables.get((guard as any).name);
+    const injectables = module.injectables;
+    return injectables.get(guard.name);
   }
 
-  public getGlobalMetadata<T extends any[]>(): T {
+  public getGlobalMetadata<T extends any[]>(
+    contextId = STATIC_CONTEXT,
+    inquirerId?: string,
+  ): T {
     if (!this.config) {
       return [] as T;
     }
-    return this.config.getGlobalGuards() as T;
+    const globalGuards = this.config.getGlobalGuards() as T;
+    if (contextId === STATIC_CONTEXT && !inquirerId) {
+      return globalGuards;
+    }
+    const scopedGuardWrappers = this.config.getGlobalRequestGuards() as InstanceWrapper[];
+    const scopedGuards = scopedGuardWrappers
+      .map(wrapper => wrapper.getInstanceByContextId(contextId, inquirerId))
+      .filter(host => host)
+      .map(host => host.instance);
+
+    return globalGuards.concat(scopedGuards) as T;
   }
 }

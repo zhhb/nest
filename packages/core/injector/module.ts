@@ -1,91 +1,114 @@
-import { InstanceWrapper, NestContainer } from './container';
 import {
-  Injectable,
+  Abstract,
+  ClassProvider,
   Controller,
-  NestModule,
   DynamicModule,
+  ExistingProvider,
+  FactoryProvider,
+  Injectable,
+  NestModule,
+  Provider,
+  ValueProvider,
 } from '@nestjs/common/interfaces';
-import { UnknownExportException } from '../errors/exceptions/unknown-export.exception';
 import { Type } from '@nestjs/common/interfaces/type.interface';
-import { ModuleRef } from './module-ref';
+import { randomStringGenerator } from '@nestjs/common/utils/random-string-generator.util';
 import {
   isFunction,
   isNil,
-  isUndefined,
   isString,
   isSymbol,
+  isUndefined,
 } from '@nestjs/common/utils/shared.utils';
+import { ApplicationConfig } from '../application-config';
+import { InvalidClassException } from '../errors/exceptions/invalid-class.exception';
 import { RuntimeException } from '../errors/exceptions/runtime.exception';
-import { ExternalContextCreator } from './../helpers/external-context-creator';
-import { GuardsContextCreator } from './../guards/guards-context-creator';
-import { InterceptorsContextCreator } from './../interceptors/interceptors-context-creator';
-import { InterceptorsConsumer } from './../interceptors/interceptors-consumer';
-import { GuardsConsumer } from './../guards/guards-consumer';
-import { ModulesContainer } from './modules-container';
-import { Reflector } from '../services/reflector.service';
-import { HTTP_SERVER_REF } from './tokens';
+import { UnknownExportException } from '../errors/exceptions/unknown-export.exception';
+import { createContextId } from '../helpers';
+import { getClassScope } from '../helpers/get-class-scope';
+import { CONTROLLER_ID_KEY } from './constants';
+import { NestContainer } from './container';
+import { InstanceWrapper } from './instance-wrapper';
+import { ModuleRef } from './module-ref';
 
-export interface CustomComponent {
-  provide: any;
-  name: string;
+interface ProviderName {
+  name?: string | symbol;
 }
-export type OpaqueToken = string | symbol | object | Type<any>;
-export type CustomClass = CustomComponent & { useClass: Type<any> };
-export type CustomFactory = CustomComponent & {
-  useFactory: (...args) => any;
-  inject?: OpaqueToken[];
-};
-export type CustomValue = CustomComponent & { useValue: any };
-export type ComponentMetatype =
-  | Type<Injectable>
-  | CustomFactory
-  | CustomValue
-  | CustomClass;
 
 export class Module {
-  private _relatedModules = new Set<Module>();
-  private _components = new Map<any, InstanceWrapper<Injectable>>();
-  private _injectables = new Map<any, InstanceWrapper<Injectable>>();
-  private _routes = new Map<string, InstanceWrapper<Controller>>();
-  private _exports = new Set<string>();
+  private readonly _id: string;
+  private readonly _imports = new Set<Module>();
+  private readonly _providers = new Map<any, InstanceWrapper<Injectable>>();
+  private readonly _injectables = new Map<any, InstanceWrapper<Injectable>>();
+  private readonly _controllers = new Map<
+    string,
+    InstanceWrapper<Controller>
+  >();
+  private readonly _exports = new Set<string | symbol>();
+  private _distance: number = 0;
 
   constructor(
     private readonly _metatype: Type<any>,
     private readonly _scope: Type<any>[],
-    container: NestContainer,
+    private readonly container: NestContainer,
   ) {
-    this.addCoreInjectables(container);
+    this.addCoreProviders(container);
+    this._id = randomStringGenerator();
+  }
+
+  get id(): string {
+    return this._id;
   }
 
   get scope(): Type<any>[] {
     return this._scope;
   }
 
-  get relatedModules(): Set<Module> {
-    return this._relatedModules;
+  get providers(): Map<any, InstanceWrapper<Injectable>> {
+    return this._providers;
   }
 
+  get imports(): Set<Module> {
+    return this._imports;
+  }
+
+  /**
+   * Left for backward-compatibility reasons
+   */
+  get relatedModules(): Set<Module> {
+    return this._imports;
+  }
+
+  /**
+   * Left for backward-compatibility reasons
+   */
   get components(): Map<string, InstanceWrapper<Injectable>> {
-    return this._components;
+    return this._providers;
+  }
+
+  /**
+   * Left for backward-compatibility reasons
+   */
+  get routes(): Map<string, InstanceWrapper<Controller>> {
+    return this._controllers;
   }
 
   get injectables(): Map<string, InstanceWrapper<Injectable>> {
     return this._injectables;
   }
 
-  get routes(): Map<string, InstanceWrapper<Controller>> {
-    return this._routes;
+  get controllers(): Map<string, InstanceWrapper<Controller>> {
+    return this._controllers;
   }
 
-  get exports(): Set<string> {
+  get exports(): Set<string | symbol> {
     return this._exports;
   }
 
   get instance(): NestModule {
-    if (!this._components.has(this._metatype.name)) {
+    if (!this._providers.has(this._metatype.name)) {
       throw new RuntimeException();
     }
-    const module = this._components.get(this._metatype.name);
+    const module = this._providers.get(this._metatype.name);
     return module.instance as NestModule;
   }
 
@@ -93,256 +116,392 @@ export class Module {
     return this._metatype;
   }
 
-  public addCoreInjectables(container: NestContainer) {
+  get distance(): number {
+    return this._distance;
+  }
+
+  set distance(value: number) {
+    this._distance = value;
+  }
+
+  public addCoreProviders(container: NestContainer) {
+    this.addModuleAsProvider();
     this.addModuleRef();
-    this.addModuleAsComponent();
-    this.addReflector();
-    this.addApplicationRef(container.getApplicationRef());
-    this.addExternalContextCreator(container);
-    this.addModulesContainer(container);
+    this.addApplicationConfig();
   }
 
   public addModuleRef() {
-    const moduleRef = this.createModuleRefMetatype(this._components);
-    this._components.set(ModuleRef.name, {
-      name: ModuleRef.name,
-      metatype: ModuleRef as any,
-      isResolved: true,
-      instance: new moduleRef(),
-    });
+    const moduleRef = this.createModuleReferenceType();
+    this._providers.set(
+      ModuleRef.name,
+      new InstanceWrapper({
+        name: ModuleRef.name,
+        metatype: ModuleRef as any,
+        isResolved: true,
+        instance: new moduleRef(),
+        host: this,
+      }),
+    );
   }
 
-  public addModuleAsComponent() {
-    this._components.set(this._metatype.name, {
-      name: this._metatype.name,
-      metatype: this._metatype,
-      isResolved: false,
-      instance: null,
-    });
+  public addModuleAsProvider() {
+    this._providers.set(
+      this._metatype.name,
+      new InstanceWrapper({
+        name: this._metatype.name,
+        metatype: this._metatype,
+        isResolved: false,
+        instance: null,
+        host: this,
+      }),
+    );
   }
 
-  public addReflector() {
-    this._components.set(Reflector.name, {
-      name: Reflector.name,
-      metatype: Reflector,
-      isResolved: false,
-      instance: null,
-    });
+  public addApplicationConfig() {
+    this._providers.set(
+      ApplicationConfig.name,
+      new InstanceWrapper({
+        name: ApplicationConfig.name,
+        isResolved: true,
+        instance: this.container.applicationConfig,
+        host: this,
+      }),
+    );
   }
 
-  public addApplicationRef(applicationRef: any) {
-    this._components.set(HTTP_SERVER_REF, {
-      name: HTTP_SERVER_REF,
-      metatype: {} as any,
-      isResolved: true,
-      instance: applicationRef || {},
-    });
-  }
-
-  public addExternalContextCreator(container: NestContainer) {
-    this._components.set(ExternalContextCreator.name, {
-      name: ExternalContextCreator.name,
-      metatype: ExternalContextCreator,
-      isResolved: true,
-      instance: new ExternalContextCreator(
-        new GuardsContextCreator(container, container.applicationConfig),
-        new GuardsConsumer(),
-        new InterceptorsContextCreator(container, container.applicationConfig),
-        new InterceptorsConsumer(),
-        container.getModules(),
-      ),
-    });
-  }
-
-  public addModulesContainer(container: NestContainer) {
-    this._components.set(ModulesContainer.name, {
-      name: ModulesContainer.name,
-      metatype: ModulesContainer,
-      isResolved: true,
-      instance: container.getModules(),
-    });
-  }
-
-  public addInjectable(injectable: Type<Injectable>) {
+  public addInjectable<T extends Injectable>(
+    injectable: Provider,
+    host?: Type<T>,
+  ) {
     if (this.isCustomProvider(injectable)) {
       return this.addCustomProvider(injectable, this._injectables);
     }
-    this._injectables.set(injectable.name, {
-      name: injectable.name,
-      metatype: injectable,
-      instance: null,
-      isResolved: false,
-    });
+    let instanceWrapper = this.injectables.get(injectable.name);
+    if (!instanceWrapper) {
+      instanceWrapper = new InstanceWrapper({
+        name: injectable.name,
+        metatype: injectable,
+        instance: null,
+        isResolved: false,
+        scope: getClassScope(injectable),
+        host: this,
+      });
+      this._injectables.set(injectable.name, instanceWrapper);
+    }
+    if (host) {
+      const token = host && host.name;
+      const hostWrapper =
+        this._controllers.get(host && host.name) || this._providers.get(token);
+      hostWrapper && hostWrapper.addEnhancerMetadata(instanceWrapper);
+    }
   }
 
-  public addComponent(component: ComponentMetatype): string {
-    if (this.isCustomProvider(component)) {
-      return this.addCustomProvider(component, this._components);
+  public addProvider(provider: Provider): string {
+    if (this.isCustomProvider(provider)) {
+      return this.addCustomProvider(provider, this._providers);
     }
-    this._components.set((component as Type<Injectable>).name, {
-      name: (component as Type<Injectable>).name,
-      metatype: component as Type<Injectable>,
-      instance: null,
-      isResolved: false,
-    });
-    return (component as Type<Injectable>).name;
+    this._providers.set(
+      (provider as Type<Injectable>).name,
+      new InstanceWrapper({
+        name: (provider as Type<Injectable>).name,
+        metatype: provider as Type<Injectable>,
+        instance: null,
+        isResolved: false,
+        scope: getClassScope(provider),
+        host: this,
+      }),
+    );
+    return (provider as Type<Injectable>).name;
   }
 
   public isCustomProvider(
-    component: ComponentMetatype,
-  ): component is CustomClass | CustomFactory | CustomValue {
-    return !isNil((component as CustomComponent).provide);
+    provider: Provider,
+  ): provider is
+    | ClassProvider
+    | FactoryProvider
+    | ValueProvider
+    | ExistingProvider {
+    return !isNil(
+      (provider as
+        | ClassProvider
+        | FactoryProvider
+        | ValueProvider
+        | ExistingProvider).provide,
+    );
   }
 
   public addCustomProvider(
-    component: CustomFactory | CustomValue | CustomClass,
+    provider: (
+      | ClassProvider
+      | FactoryProvider
+      | ValueProvider
+      | ExistingProvider
+    ) &
+      ProviderName,
     collection: Map<string, any>,
   ): string {
-    const { provide } = component;
-    const name = isFunction(provide) ? provide.name : provide;
-    const componentWithName = {
-      ...component,
+    const name = this.getProviderStaticToken(provider.provide) as string;
+    provider = {
+      ...provider,
       name,
     };
-    if (this.isCustomClass(componentWithName))
-      this.addCustomClass(componentWithName, collection);
-    else if (this.isCustomValue(componentWithName))
-      this.addCustomValue(componentWithName, collection);
-    else if (this.isCustomFactory(componentWithName))
-      this.addCustomFactory(componentWithName, collection);
-
+    if (this.isCustomClass(provider)) {
+      this.addCustomClass(provider, collection);
+    } else if (this.isCustomValue(provider)) {
+      this.addCustomValue(provider, collection);
+    } else if (this.isCustomFactory(provider)) {
+      this.addCustomFactory(provider, collection);
+    } else if (this.isCustomUseExisting(provider)) {
+      this.addCustomUseExisting(provider, collection);
+    }
     return name;
   }
 
-  public isCustomClass(component): component is CustomClass {
-    return !isUndefined((component as CustomClass).useClass);
+  public isCustomClass(provider: any): provider is ClassProvider {
+    return !isUndefined((provider as ClassProvider).useClass);
   }
 
-  public isCustomValue(component): component is CustomValue {
-    return !isUndefined((component as CustomValue).useValue);
+  public isCustomValue(provider: any): provider is ValueProvider {
+    return !isUndefined((provider as ValueProvider).useValue);
   }
 
-  public isCustomFactory(component): component is CustomFactory {
-    return !isUndefined((component as CustomFactory).useFactory);
+  public isCustomFactory(provider: any): provider is FactoryProvider {
+    return !isUndefined((provider as FactoryProvider).useFactory);
   }
 
-  public isDynamicModule(exported): exported is DynamicModule {
+  public isCustomUseExisting(provider: any): provider is ExistingProvider {
+    return !isUndefined((provider as ExistingProvider).useExisting);
+  }
+
+  public isDynamicModule(exported: any): exported is DynamicModule {
     return exported && exported.module;
   }
 
-  public addCustomClass(component: CustomClass, collection: Map<string, any>) {
-    const { provide, name, useClass } = component;
-    collection.set(name, {
-      name,
-      metatype: useClass,
-      instance: null,
-      isResolved: false,
-    });
+  public addCustomClass(
+    provider: ClassProvider & ProviderName,
+    collection: Map<string, InstanceWrapper>,
+  ) {
+    const { name, useClass } = provider;
+
+    let { scope } = provider;
+    if (isUndefined(scope)) {
+      scope = getClassScope(useClass);
+    }
+    collection.set(
+      name as string,
+      new InstanceWrapper({
+        name,
+        metatype: useClass,
+        instance: null,
+        isResolved: false,
+        scope,
+        host: this,
+      }),
+    );
   }
 
-  public addCustomValue(component: CustomValue, collection: Map<string, any>) {
-    const { provide, name, useValue: value } = component;
-    collection.set(name, {
-      name,
-      metatype: null,
-      instance: value,
-      isResolved: true,
-      isNotMetatype: true,
-      async: value instanceof Promise,
-    });
+  public addCustomValue(
+    provider: ValueProvider & ProviderName,
+    collection: Map<string, InstanceWrapper>,
+  ) {
+    const { name, useValue: value } = provider;
+    collection.set(
+      name as string,
+      new InstanceWrapper({
+        name,
+        metatype: null,
+        instance: value,
+        isResolved: true,
+        async: value instanceof Promise,
+        host: this,
+      }),
+    );
   }
 
   public addCustomFactory(
-    component: CustomFactory,
-    collection: Map<string, any>,
+    provider: FactoryProvider & ProviderName,
+    collection: Map<string, InstanceWrapper>,
   ) {
-    const { provide, name, useFactory: factory, inject } = component;
-    collection.set(name, {
-      name,
-      metatype: factory as any,
-      instance: null,
-      isResolved: false,
-      inject: inject || [],
-      isNotMetatype: true,
-    });
+    const { name, useFactory: factory, inject, scope } = provider;
+    collection.set(
+      name as string,
+      new InstanceWrapper({
+        name,
+        metatype: factory as any,
+        instance: null,
+        isResolved: false,
+        inject: inject || [],
+        scope,
+        host: this,
+      }),
+    );
   }
 
-  public addExportedComponent(
-    exportedComponent: ComponentMetatype | string | DynamicModule,
+  public addCustomUseExisting(
+    provider: ExistingProvider & ProviderName,
+    collection: Map<string, InstanceWrapper>,
   ) {
-    const addExportedUnit = (token: string) =>
+    const { name, useExisting } = provider;
+    collection.set(
+      name as string,
+      new InstanceWrapper({
+        name,
+        metatype: (instance => instance) as any,
+        instance: null,
+        isResolved: false,
+        inject: [useExisting],
+        host: this,
+      }),
+    );
+  }
+
+  public addExportedProvider(
+    provider: (Provider & ProviderName) | string | symbol | DynamicModule,
+  ) {
+    const addExportedUnit = (token: string | symbol) =>
       this._exports.add(this.validateExportedProvider(token));
 
-    if (this.isCustomProvider(exportedComponent as any)) {
-      return this.addCustomExportedComponent(exportedComponent as any);
-    } else if (isString(exportedComponent)) {
-      return addExportedUnit(exportedComponent);
-    } else if (this.isDynamicModule(exportedComponent)) {
-      const { module } = exportedComponent;
+    if (this.isCustomProvider(provider as any)) {
+      return this.addCustomExportedProvider(provider as any);
+    } else if (isString(provider) || isSymbol(provider)) {
+      return addExportedUnit(provider);
+    } else if (this.isDynamicModule(provider)) {
+      const { module } = provider;
       return addExportedUnit(module.name);
     }
-    addExportedUnit(exportedComponent.name);
+    addExportedUnit(provider.name);
   }
 
-  public addCustomExportedComponent(
-    exportedComponent: CustomFactory | CustomValue | CustomClass,
+  public addCustomExportedProvider(
+    provider:
+      | FactoryProvider
+      | ValueProvider
+      | ClassProvider
+      | ExistingProvider,
   ) {
-    const provide = exportedComponent.provide;
+    const provide = provider.provide;
     if (isString(provide) || isSymbol(provide)) {
       return this._exports.add(this.validateExportedProvider(provide));
     }
     this._exports.add(this.validateExportedProvider(provide.name));
   }
 
-  public validateExportedProvider(token: string) {
-    if (this._components.has(token)) {
+  public validateExportedProvider(token: string | symbol) {
+    if (this._providers.has(token)) {
       return token;
     }
-    const relatedModules = [...this._relatedModules.values()];
-    const modulesTokens = relatedModules
+    const importsArray = [...this._imports.values()];
+    const importsNames = importsArray
+      .filter(item => item)
       .map(({ metatype }) => metatype)
-      .filter(metatype => !!metatype)
+      .filter(metatype => metatype)
       .map(({ name }) => name);
 
-    if (modulesTokens.indexOf(token) < 0) {
+    if (!importsNames.includes(token as any)) {
       const { name } = this.metatype;
-      throw new UnknownExportException(name);
+      throw new UnknownExportException(token as any, name);
     }
     return token;
   }
 
-  public addRoute(route: Type<Controller>) {
-    this._routes.set(route.name, {
-      name: route.name,
-      metatype: route,
-      instance: null,
-      isResolved: false,
+  public addController(controller: Type<Controller>) {
+    this._controllers.set(
+      controller.name,
+      new InstanceWrapper({
+        name: controller.name,
+        metatype: controller,
+        instance: null,
+        isResolved: false,
+        scope: getClassScope(controller),
+        host: this,
+      }),
+    );
+
+    this.assignControllerUniqueId(controller);
+  }
+
+  public assignControllerUniqueId(controller: Type<Controller>) {
+    Object.defineProperty(controller, CONTROLLER_ID_KEY, {
+      enumerable: false,
+      writable: false,
+      configurable: true,
+      value: randomStringGenerator(),
     });
   }
 
-  public addRelatedModule(relatedModule) {
-    this._relatedModules.add(relatedModule);
+  public addRelatedModule(module: Module) {
+    this._imports.add(module);
   }
 
-  public replace(toReplace, options) {
-    if (options.isComponent) {
-      return this.addComponent({ provide: toReplace, ...options });
+  public replace(toReplace: string | symbol | Type<any>, options: any) {
+    if (options.isProvider && this.hasProvider(toReplace)) {
+      const name = this.getProviderStaticToken(toReplace);
+      const originalProvider = this._providers.get(name);
+
+      return originalProvider.mergeWith({ provide: toReplace, ...options });
+    } else if (!options.isProvider && this.hasInjectable(toReplace)) {
+      const name = this.getProviderStaticToken(toReplace);
+      const originalInjectable = this._injectables.get(name);
+
+      return originalInjectable.mergeWith({
+        provide: toReplace,
+        ...options,
+      });
     }
-    this.addInjectable({
-      provide: toReplace,
-      ...options,
-    });
   }
 
-  public createModuleRefMetatype(components) {
-    return class {
-      public readonly components = components;
+  public hasProvider(token: string | symbol | Type<any>): boolean {
+    const name = this.getProviderStaticToken(token);
+    return this._providers.has(name);
+  }
 
-      public get<T>(type: OpaqueToken): T {
-        const name = isFunction(type) ? (type as Type<any>).name : type;
-        const exists = this.components.has(name);
+  public hasInjectable(token: string | symbol | Type<any>): boolean {
+    const name = this.getProviderStaticToken(token);
+    return this._injectables.has(name);
+  }
 
-        return exists ? (this.components.get(name).instance as T) : null;
+  public getProviderStaticToken(
+    provider: string | symbol | Type<any> | Abstract<any>,
+  ): string | symbol {
+    return isFunction(provider)
+      ? (provider as Function).name
+      : (provider as string | symbol);
+  }
+
+  public getProviderByKey<T = any>(name: string | symbol): InstanceWrapper<T> {
+    return this._providers.get(name) as InstanceWrapper<T>;
+  }
+
+  public createModuleReferenceType(): any {
+    const self = this;
+    return class extends ModuleRef {
+      constructor() {
+        super(self.container);
+      }
+
+      public get<TInput = any, TResult = TInput>(
+        typeOrToken: Type<TInput> | string | symbol,
+        options: { strict: boolean } = { strict: true },
+      ): TResult {
+        if (!(options && options.strict)) {
+          return this.find<TInput, TResult>(typeOrToken);
+        }
+        return this.findInstanceByToken<TInput, TResult>(typeOrToken, self);
+      }
+
+      public resolve<TInput = any, TResult = TInput>(
+        typeOrToken: Type<TInput> | string | symbol,
+        contextId = createContextId(),
+        options: { strict: boolean } = { strict: true },
+      ): Promise<TResult> {
+        return this.resolvePerContext(typeOrToken, self, contextId, options);
+      }
+
+      public async create<T = any>(type: Type<T>): Promise<T> {
+        if (!(type && isFunction(type) && type.prototype)) {
+          throw new InvalidClassException(type);
+        }
+        return this.instantiateClass<T>(type, self);
       }
     };
   }

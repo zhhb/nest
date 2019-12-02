@@ -1,42 +1,34 @@
-import 'reflect-metadata';
-import { NestGateway } from './interfaces/nest-gateway.interface';
-import { Injectable } from '@nestjs/common/interfaces/injectable.interface';
-import { ObservableSocketServer } from './interfaces/observable-socket-server.interface';
-import { InvalidSocketPortException } from './exceptions/invalid-socket-port.exception';
+import { Type } from '@nestjs/common/interfaces/type.interface';
+import { isFunction } from '@nestjs/common/utils/shared.utils';
+import { ApplicationConfig } from '@nestjs/core/application-config';
+import { MetadataScanner } from '@nestjs/core/metadata-scanner';
+import { from as fromPromise, Observable, of, Subject } from 'rxjs';
+import { distinctUntilChanged, mergeAll } from 'rxjs/operators';
+import { GATEWAY_OPTIONS, PORT_METADATA } from './constants';
+import { WsContextCreator } from './context/ws-context-creator';
+import { InvalidSocketPortException } from './errors/invalid-socket-port.exception';
 import {
   GatewayMetadataExplorer,
   MessageMappingProperties,
 } from './gateway-metadata-explorer';
-import { Subject, Observable, from as fromPromise, of } from 'rxjs';
+import { NestGateway } from './interfaces/nest-gateway.interface';
+import { SocketEventsHost } from './interfaces/socket-events-host.interface';
 import { SocketServerProvider } from './socket-server-provider';
-import { PORT_METADATA, GATEWAY_OPTIONS } from './constants';
-import { Type } from '@nestjs/common/interfaces/type.interface';
-import { MetadataScanner } from '@nestjs/core/metadata-scanner';
-import { NestContainer } from '@nestjs/core/injector/container';
-import { MiddlewareInjector } from './middleware-injector';
-import { ApplicationConfig } from '@nestjs/core/application-config';
-import { WsContextCreator } from './context/ws-context-creator';
-import { isFunction } from '@nestjs/common/utils/shared.utils';
-import { mergeMap, distinctUntilChanged } from 'rxjs/operators';
 
 export class WebSocketsController {
   private readonly metadataExplorer = new GatewayMetadataExplorer(
     new MetadataScanner(),
   );
-  private readonly middlewareInjector: MiddlewareInjector;
 
   constructor(
     private readonly socketServerProvider: SocketServerProvider,
-    private readonly container: NestContainer,
     private readonly config: ApplicationConfig,
     private readonly contextCreator: WsContextCreator,
-  ) {
-    this.middlewareInjector = new MiddlewareInjector(container, config);
-  }
+  ) {}
 
-  public hookGatewayIntoServer(
+  public mergeGatewayAndServer(
     instance: NestGateway,
-    metatype: Type<any>,
+    metatype: Type<any> | Function,
     module: string,
   ) {
     const options = Reflect.getMetadata(GATEWAY_OPTIONS, metatype) || {};
@@ -45,39 +37,40 @@ export class WebSocketsController {
     if (!Number.isInteger(port)) {
       throw new InvalidSocketPortException(port, metatype);
     }
-    this.subscribeObservableServer(instance, options, port, module);
+    this.subscribeToServerEvents(instance, options, port, module);
   }
 
-  public subscribeObservableServer(
+  public subscribeToServerEvents(
     instance: NestGateway,
     options: any,
     port: number,
     module: string,
   ) {
-    const plainMessageHandlers = this.metadataExplorer.explore(instance);
-    const messageHandlers = plainMessageHandlers.map(
-      ({ callback, message }) => ({
+    const nativeMessageHandlers = this.metadataExplorer.explore(instance);
+    const messageHandlers = nativeMessageHandlers.map(
+      ({ callback, message, methodName }) => ({
         message,
-        callback: this.contextCreator.create(instance, callback, module),
+        methodName,
+        callback: this.contextCreator.create(
+          instance,
+          callback,
+          module,
+          methodName,
+        ),
       }),
     );
     const observableServer = this.socketServerProvider.scanForSocketServer(
       options,
       port,
     );
-    this.injectMiddleware(observableServer, instance, module);
-    this.hookServerToProperties(instance, observableServer.server);
+    this.assignServerToProperties(instance, observableServer.server);
     this.subscribeEvents(instance, messageHandlers, observableServer);
-  }
-
-  public injectMiddleware({ server }, instance: NestGateway, module: string) {
-    this.middlewareInjector.inject(server, instance, module);
   }
 
   public subscribeEvents(
     instance: NestGateway,
-    messageHandlers: MessageMappingProperties[],
-    observableServer: ObservableSocketServer,
+    subscribersMap: MessageMappingProperties[],
+    observableServer: SocketEventsHost,
   ) {
     const { init, disconnect, connection, server } = observableServer;
     const adapter = this.config.getIoAdapter();
@@ -89,7 +82,7 @@ export class WebSocketsController {
     const handler = this.getConnectionHandler(
       this,
       instance,
-      messageHandlers,
+      subscribersMap,
       disconnect,
       connection,
     );
@@ -99,18 +92,21 @@ export class WebSocketsController {
   public getConnectionHandler(
     context: WebSocketsController,
     instance: NestGateway,
-    messageHandlers: MessageMappingProperties[],
+    subscribersMap: MessageMappingProperties[],
     disconnect: Subject<any>,
     connection: Subject<any>,
   ) {
     const adapter = this.config.getIoAdapter();
-    return client => {
-      connection.next(client);
-      context.subscribeMessages(messageHandlers, client, instance);
+    return (...args: any[]) => {
+      const [client] = args;
+      connection.next(args);
+      context.subscribeMessages(subscribersMap, client, instance);
 
       const disconnectHook = adapter.bindClientDisconnect;
       disconnectHook &&
-        disconnectHook.call(adapter, client, socket => disconnect.next(client));
+        disconnectHook.call(adapter, client, (_: any) =>
+          disconnect.next(client),
+        );
     };
   }
 
@@ -124,7 +120,7 @@ export class WebSocketsController {
     if (instance.handleConnection) {
       event
         .pipe(distinctUntilChanged())
-        .subscribe(instance.handleConnection.bind(instance));
+        .subscribe((args: any[]) => instance.handleConnection(...args));
     }
   }
 
@@ -136,18 +132,18 @@ export class WebSocketsController {
     }
   }
 
-  public subscribeMessages(
-    messageHandlers: MessageMappingProperties[],
-    client,
+  public subscribeMessages<T = any>(
+    subscribersMap: MessageMappingProperties[],
+    client: T,
     instance: NestGateway,
   ) {
     const adapter = this.config.getIoAdapter();
-    const handlers = messageHandlers.map(({ callback, message }) => ({
+    const handlers = subscribersMap.map(({ callback, message }) => ({
       message,
       callback: callback.bind(instance, client),
     }));
     adapter.bindMessageHandlers(client, handlers, data =>
-      fromPromise(this.pickResult(data)).pipe(mergeMap(stream => stream)),
+      fromPromise(this.pickResult(data)).pipe(mergeAll()),
     );
   }
 
@@ -164,7 +160,10 @@ export class WebSocketsController {
     return of(result);
   }
 
-  private hookServerToProperties(instance: NestGateway, server) {
+  private assignServerToProperties<T = any>(
+    instance: NestGateway,
+    server: any,
+  ) {
     for (const propertyKey of this.metadataExplorer.scanForServerHooks(
       instance,
     )) {

@@ -4,4 +4,6 @@ export enum Transport {
   NATS,
   MQTT,
   GRPC,
+  RMQ,
+  KAFKA,
 }

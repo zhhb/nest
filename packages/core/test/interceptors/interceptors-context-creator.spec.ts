@@ -1,6 +1,8 @@
-import * as sinon from 'sinon';
 import { expect } from 'chai';
-import { Observable, of } from 'rxjs';
+import { of } from 'rxjs';
+import * as sinon from 'sinon';
+import { ApplicationConfig } from '../../application-config';
+import { InstanceWrapper } from '../../injector/instance-wrapper';
 import { InterceptorsContextCreator } from '../../interceptors/interceptors-context-creator';
 
 class Interceptor {}
@@ -8,19 +10,22 @@ class Interceptor {}
 describe('InterceptorsContextCreator', () => {
   let interceptorsContextCreator: InterceptorsContextCreator;
   let interceptors: any[];
-  let container;
-  let getSpy;
+  let applicationConfig: ApplicationConfig;
+  let container: any;
+  let getSpy: sinon.SinonSpy;
 
   beforeEach(() => {
     interceptors = [
       {
         name: 'test',
+        getInstanceByContextId: () => interceptors[0],
         instance: {
           intercept: () => of(true),
         },
       },
       {
         name: 'test2',
+        getInstanceByContextId: () => interceptors[1],
         instance: {
           intercept: () => of(true),
         },
@@ -39,8 +44,10 @@ describe('InterceptorsContextCreator', () => {
         get: getSpy,
       }),
     };
+    applicationConfig = new ApplicationConfig();
     interceptorsContextCreator = new InterceptorsContextCreator(
       container as any,
+      applicationConfig,
     );
   });
   describe('createConcreteContext', () => {
@@ -76,7 +83,10 @@ describe('InterceptorsContextCreator', () => {
     });
     describe('when param is a constructor', () => {
       it('should pick instance from container', () => {
-        const wrapper = { instance: 'test' };
+        const wrapper: InstanceWrapper = {
+          instance: 'test',
+          getInstanceByContextId: () => wrapper,
+        } as any;
         sinon
           .stub(interceptorsContextCreator, 'getInstanceByMetatype')
           .callsFake(() => wrapper);
@@ -113,6 +123,39 @@ describe('InterceptorsContextCreator', () => {
           expect(interceptorsContextCreator.getInstanceByMetatype({})).to.be
             .undefined;
         });
+      });
+    });
+  });
+
+  describe('getGlobalMetadata', () => {
+    describe('when contextId is static and inquirerId is nil', () => {
+      it('should return global interceptors', () => {
+        const expectedResult = applicationConfig.getGlobalInterceptors();
+        expect(interceptorsContextCreator.getGlobalMetadata()).to.be.equal(
+          expectedResult,
+        );
+      });
+    });
+    describe('otherwise', () => {
+      it('should merge static global with request/transient scoped interceptors', () => {
+        const globalInterceptors: any = ['test'];
+        const instanceWrapper = new InstanceWrapper();
+        const instance = 'request-scoped';
+        const scopedInterceptorWrappers = [instanceWrapper];
+
+        sinon
+          .stub(applicationConfig, 'getGlobalInterceptors')
+          .callsFake(() => globalInterceptors);
+        sinon
+          .stub(applicationConfig, 'getGlobalRequestInterceptors')
+          .callsFake(() => scopedInterceptorWrappers);
+        sinon
+          .stub(instanceWrapper, 'getInstanceByContextId')
+          .callsFake(() => ({ instance } as any));
+
+        expect(
+          interceptorsContextCreator.getGlobalMetadata({ id: 3 }),
+        ).to.contains(instance, ...globalInterceptors);
       });
     });
   });

@@ -1,15 +1,17 @@
-import { Server } from './server';
-import { NO_PATTERN_MESSAGE } from '../constants';
+import { isUndefined } from '@nestjs/common/utils/shared.utils';
+import { Observable } from 'rxjs';
 import {
-  MicroserviceOptions,
-  NatsOptions,
-} from '../interfaces/microservice-configuration.interface';
-import { CustomTransportStrategy, PacketId } from './../interfaces';
-import { Observable, EMPTY as empty } from 'rxjs';
-import { catchError, finalize } from 'rxjs/operators';
-import { NATS_DEFAULT_URL, CONNECT_EVENT, ERROR_EVENT } from './../constants';
-import { ReadPacket } from './../interfaces/packet.interface';
+  CONNECT_EVENT,
+  ERROR_EVENT,
+  NATS_DEFAULT_URL,
+  NO_MESSAGE_HANDLER,
+} from '../constants';
+import { NatsContext } from '../ctx-host/nats.context';
 import { Client } from '../external/nats-client.interface';
+import { CustomTransportStrategy, PacketId } from '../interfaces';
+import { NatsOptions } from '../interfaces/microservice-configuration.interface';
+import { IncomingRequest, ReadPacket } from '../interfaces/packet.interface';
+import { Server } from './server';
 
 let natsPackage: any = {};
 
@@ -17,12 +19,16 @@ export class ServerNats extends Server implements CustomTransportStrategy {
   private readonly url: string;
   private natsClient: Client;
 
-  constructor(private readonly options: MicroserviceOptions) {
+  constructor(private readonly options: NatsOptions['options']) {
     super();
-    this.url =
-      this.getOptionsProp<NatsOptions>(this.options, 'url') || NATS_DEFAULT_URL;
+    this.url = this.getOptionsProp(this.options, 'url') || NATS_DEFAULT_URL;
 
-    natsPackage = this.loadPackage('nats', ServerNats.name);
+    natsPackage = this.loadPackage('nats', ServerNats.name, () =>
+      require('nats'),
+    );
+
+    this.initializeSerializer(options);
+    this.initializeDeserializer(options);
   }
 
   public listen(callback: () => void) {
@@ -37,14 +43,22 @@ export class ServerNats extends Server implements CustomTransportStrategy {
   }
 
   public bindEvents(client: Client) {
-    const registeredPatterns = Object.keys(this.messageHandlers);
-    registeredPatterns.forEach(pattern => {
-      const channel = this.getAckQueueName(pattern);
-      client.subscribe(
-        channel,
-        this.getMessageHandler(channel, client).bind(this),
-      );
-    });
+    const queue = this.getOptionsProp(this.options, 'queue');
+    const subscribe = queue
+      ? (channel: string) =>
+          client.subscribe(
+            channel,
+            { queue },
+            this.getMessageHandler(channel, client).bind(this),
+          )
+      : (channel: string) =>
+          client.subscribe(
+            channel,
+            this.getMessageHandler(channel, client).bind(this),
+          );
+
+    const registeredPatterns = [...this.messageHandlers.keys()];
+    registeredPatterns.forEach(channel => subscribe(channel));
   }
 
   public close() {
@@ -53,53 +67,64 @@ export class ServerNats extends Server implements CustomTransportStrategy {
   }
 
   public createNatsClient(): Client {
-    const options = this.options.options || ({} as NatsOptions);
+    const options = this.options || ({} as NatsOptions);
     return natsPackage.connect({
-      ...(options as any),
+      ...options,
       url: this.url,
       json: true,
     });
   }
 
-  public getMessageHandler(channel: string, client: Client) {
-    return async buffer => await this.handleMessage(channel, buffer, client);
+  public getMessageHandler(channel: string, client: Client): Function {
+    return async (
+      buffer: ReadPacket & PacketId,
+      replyTo: string,
+      callerSubject: string,
+    ) => this.handleMessage(channel, buffer, client, replyTo, callerSubject);
   }
 
   public async handleMessage(
     channel: string,
-    message: ReadPacket & PacketId,
+    rawMessage: any,
     client: Client,
+    replyTo: string,
+    callerSubject: string,
   ) {
-    const pattern = channel.replace(/_ack$/, '');
-    const publish = this.getPublisher(client, pattern, message.id);
-    const status = 'error';
-
-    if (!this.messageHandlers[pattern]) {
-      return publish({ id: message.id, status, err: NO_PATTERN_MESSAGE });
+    const natsCtx = new NatsContext([callerSubject]);
+    const message = this.deserializer.deserialize(rawMessage, { channel });
+    if (isUndefined((message as IncomingRequest).id)) {
+      return this.handleEvent(channel, message, natsCtx);
     }
-    const handler = this.messageHandlers[pattern];
+    const publish = this.getPublisher(
+      client,
+      replyTo,
+      (message as IncomingRequest).id,
+    );
+    const handler = this.getHandlerByPattern(channel);
+    if (!handler) {
+      const status = 'error';
+      const noHandlerPacket = {
+        id: (message as IncomingRequest).id,
+        status,
+        err: NO_MESSAGE_HANDLER,
+      };
+      return publish(noHandlerPacket);
+    }
     const response$ = this.transformToObservable(
-      await handler(message.data),
+      await handler(message.data, natsCtx),
     ) as Observable<any>;
     response$ && this.send(response$, publish);
   }
 
-  public getPublisher(publisher: Client, pattern: any, id: string) {
-    return response =>
-      publisher.publish(this.getResQueueName(pattern), Object.assign(response, {
-        id,
-      }) as any);
+  public getPublisher(publisher: Client, replyTo: string, id: string) {
+    return (response: any) => {
+      Object.assign(response, { id });
+      const outgoingResponse = this.serializer.serialize(response);
+      return publisher.publish(replyTo, outgoingResponse);
+    };
   }
 
-  public getAckQueueName(pattern: string): string {
-    return `${pattern}_ack`;
-  }
-
-  public getResQueueName(pattern: string): string {
-    return `${pattern}_res`;
-  }
-
-  public handleError(stream) {
-    stream.on(ERROR_EVENT, err => this.logger.error(err));
+  public handleError(stream: any) {
+    stream.on(ERROR_EVENT, (err: any) => this.logger.error(err));
   }
 }

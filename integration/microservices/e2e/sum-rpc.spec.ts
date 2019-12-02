@@ -1,9 +1,10 @@
-import * as express from 'express';
-import * as request from 'supertest';
-import { Test } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
-import { ApplicationModule } from './../src/app.module';
 import { Transport } from '@nestjs/microservices';
+import { Test } from '@nestjs/testing';
+import { expect } from 'chai';
+import * as request from 'supertest';
+import { AppController } from '../src/app.controller';
+import { ApplicationModule } from '../src/app.module';
 
 describe('RPC transport', () => {
   let server;
@@ -14,10 +15,14 @@ describe('RPC transport', () => {
       imports: [ApplicationModule],
     }).compile();
 
-    server = express();
-    app = module.createNestApplication(server);
+    app = module.createNestApplication();
+    server = app.getHttpAdapter().getInstance();
+
     app.connectMicroservice({
       transport: Transport.TCP,
+      options: {
+        host: '0.0.0.0',
+      },
     });
     await app.startAllMicroservicesAsync();
     await app.init();
@@ -49,11 +54,16 @@ describe('RPC transport', () => {
     return request(server)
       .post('/concurrent')
       .send([
-        [1, 2, 3, 4, 5],
-        [6, 7, 8, 9, 10],
-        [11, 12, 13, 14, 15],
-        [16, 17, 18, 19, 20],
-        [21, 22, 23, 24, 25],
+        Array.from({ length: 10 }, (v, k) => k + 1),
+        Array.from({ length: 10 }, (v, k) => k + 11),
+        Array.from({ length: 10 }, (v, k) => k + 21),
+        Array.from({ length: 10 }, (v, k) => k + 31),
+        Array.from({ length: 10 }, (v, k) => k + 41),
+        Array.from({ length: 10 }, (v, k) => k + 51),
+        Array.from({ length: 10 }, (v, k) => k + 61),
+        Array.from({ length: 10 }, (v, k) => k + 71),
+        Array.from({ length: 10 }, (v, k) => k + 81),
+        Array.from({ length: 10 }, (v, k) => k + 91),
       ])
       .expect(200, 'true');
   });
@@ -69,6 +79,18 @@ describe('RPC transport', () => {
     return request(server)
       .post('/?command=test')
       .expect(500);
+  });
+
+  it(`/POST (event notification)`, done => {
+    request(server)
+      .post('/notify')
+      .send([1, 2, 3, 4, 5])
+      .end(() => {
+        setTimeout(() => {
+          expect(AppController.IS_NOTIFIED).to.be.true;
+          done();
+        }, 1000);
+      });
   });
 
   afterEach(async () => {

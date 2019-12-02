@@ -1,9 +1,14 @@
-import * as sinon from 'sinon';
-import { expect } from 'chai';
-import { SocketServerProvider } from '../socket-server-provider';
-import { SocketsContainer } from '../container';
 import { ApplicationConfig } from '@nestjs/core/application-config';
-import { IoAdapter } from '@nestjs/websockets/adapters/io-adapter';
+import { expect } from 'chai';
+import * as sinon from 'sinon';
+import { SocketServerProvider } from '../socket-server-provider';
+import { SocketsContainer } from '../sockets-container';
+import { AbstractWsAdapter } from '../adapters/ws-adapter';
+
+class NoopAdapter extends AbstractWsAdapter {
+  public create(port: number, options?: any) {}
+  public bindMessageHandlers(client: any, handlers) {}
+}
 
 describe('SocketServerProvider', () => {
   let instance: SocketServerProvider;
@@ -14,7 +19,7 @@ describe('SocketServerProvider', () => {
     mockContainer = sinon.mock(socketsContainer);
     instance = new SocketServerProvider(
       socketsContainer,
-      new ApplicationConfig(new IoAdapter()),
+      new ApplicationConfig(new NoopAdapter()),
     );
   });
   describe('scanForSocketServer', () => {
@@ -23,14 +28,14 @@ describe('SocketServerProvider', () => {
     const port = 30;
 
     beforeEach(() => {
-      createSocketServerSpy = sinon.spy(instance, 'createSocketServer');
+      createSocketServerSpy = sinon.spy(instance, 'createSocketServer' as any);
     });
     afterEach(() => {
       mockContainer.restore();
     });
     it(`should returns stored server`, () => {
       const server = { test: 'test' };
-      mockContainer.expects('getServerByPort').returns(server);
+      mockContainer.expects('getSocketEventsHostByPort').returns(server);
 
       const result = instance.scanForSocketServer({ namespace: null }, port);
 
@@ -38,7 +43,7 @@ describe('SocketServerProvider', () => {
       expect(result).to.eq(server);
     });
     it(`should call "createSocketServer" when server is not stored already`, () => {
-      mockContainer.expects('getServerByPort').returns(null);
+      mockContainer.expects('getSocketEventsHostByPort').returns(null);
 
       instance.scanForSocketServer({ namespace }, port);
       expect(createSocketServerSpy.called).to.be.true;

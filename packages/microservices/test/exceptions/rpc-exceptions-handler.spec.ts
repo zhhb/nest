@@ -1,9 +1,9 @@
-import * as sinon from 'sinon';
 import { expect } from 'chai';
-import { RpcExceptionsHandler } from './../../exceptions/rpc-exceptions-handler';
-import { RpcException } from './../../exceptions/rpc-exception';
-import { Observable, of, EMPTY as empty } from 'rxjs';
+import { EMPTY as empty, of } from 'rxjs';
 import { catchError } from 'rxjs/operators';
+import * as sinon from 'sinon';
+import { RpcException } from '../../exceptions/rpc-exception';
+import { RpcExceptionsHandler } from '../../exceptions/rpc-exceptions-handler';
 
 describe('RpcExceptionsHandler', () => {
   let handler: RpcExceptionsHandler;
@@ -17,7 +17,7 @@ describe('RpcExceptionsHandler', () => {
       const stream$ = handler.handle(new Error(), null);
       stream$
         .pipe(
-          catchError(err => {
+          catchError((err: any) => {
             expect(err).to.be.eql({
               status: 'error',
               message: 'Internal server error',
@@ -36,7 +36,7 @@ describe('RpcExceptionsHandler', () => {
         const stream$ = handler.handle(new RpcException(message), null);
         stream$
           .pipe(
-            catchError(err => {
+            catchError((err: any) => {
               expect(err).to.be.eql(message);
               done();
               return empty;
@@ -50,7 +50,7 @@ describe('RpcExceptionsHandler', () => {
         const stream$ = handler.handle(new RpcException(message), null);
         stream$
           .pipe(
-            catchError(err => {
+            catchError((err: any) => {
               expect(err).to.be.eql({ message, status: 'error' });
               done();
               return empty;
@@ -108,8 +108,8 @@ describe('RpcExceptionsHandler', () => {
           expect(funcSpy.calledWith(exception)).to.be.true;
         });
         it('should returns stream', () => {
-          expect(handler.invokeCustomFilters(new TestException(), null)).to.be.not
-            .null;
+          expect(handler.invokeCustomFilters(new TestException(), null)).to.be
+            .not.null;
         });
       });
       describe('when filter does not exists in filters array', () => {
@@ -118,7 +118,8 @@ describe('RpcExceptionsHandler', () => {
           expect(funcSpy.notCalled).to.be.true;
         });
         it('should returns null', () => {
-          expect(handler.invokeCustomFilters(new TestException(), null)).to.be.null;
+          expect(handler.invokeCustomFilters(new TestException(), null)).to.be
+            .null;
         });
       });
     });

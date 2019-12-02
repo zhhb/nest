@@ -1,36 +1,38 @@
-import * as sinon from 'sinon';
+import { Injectable } from '@nestjs/common';
 import { expect } from 'chai';
-import { DependenciesScanner } from './../scanner';
-import { NestContainer } from './../injector/container';
-import { Module } from '../../common/decorators/modules/module.decorator';
-import { NestModule } from '../../common/interfaces/modules/nest-module.interface';
-import { Component } from '../../common/decorators/core/component.decorator';
-import { UseGuards } from '../../common/decorators/core/use-guards.decorator';
-import { Controller } from '../../common/decorators/core/controller.decorator';
-import { MetadataScanner } from '../metadata-scanner';
+import * as sinon from 'sinon';
 import { GUARDS_METADATA } from '../../common/constants';
+import { Controller } from '../../common/decorators/core/controller.decorator';
+import { UseGuards } from '../../common/decorators/core/use-guards.decorator';
+import { Module } from '../../common/decorators/modules/module.decorator';
+import { Scope } from '../../common/interfaces';
 import { ApplicationConfig } from '../application-config';
-import { APP_INTERCEPTOR, APP_GUARD, APP_PIPE, APP_FILTER } from '../constants';
-
-class Guard {}
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE } from '../constants';
+import { NestContainer } from '../injector/container';
+import { InstanceWrapper } from '../injector/instance-wrapper';
+import { MetadataScanner } from '../metadata-scanner';
+import { DependenciesScanner } from '../scanner';
 
 describe('DependenciesScanner', () => {
-  @Component()
+  class Guard {}
+
+  @Injectable()
   class TestComponent {}
+
   @Controller('')
-  class TestRoute {}
+  class TestController {}
 
   @Module({
     providers: [TestComponent],
-    controllers: [TestRoute],
+    controllers: [TestController],
     exports: [TestComponent],
   })
-  class AnotherTestModule {}
+  class BasicModule {}
 
   @Module({
-    imports: [AnotherTestModule],
+    imports: [BasicModule],
     providers: [TestComponent],
-    controllers: [TestRoute],
+    controllers: [TestController],
   })
   class TestModule {}
 
@@ -47,36 +49,38 @@ describe('DependenciesScanner', () => {
       new MetadataScanner(),
       new ApplicationConfig(),
     );
+    sinon.stub(scanner, 'registerCoreModule').callsFake(async () => {});
   });
 
   afterEach(() => {
     mockContainer.restore();
   });
 
-  it('should "storeModule" call twice (2 modules) container method "addModule"', () => {
+  it('should "insertModule" call twice (2 modules) container method "addModule"', async () => {
     const expectation = mockContainer.expects('addModule').twice();
-    scanner.scan(TestModule as any);
+
+    await scanner.scan(TestModule as any);
     expectation.verify();
   });
 
-  it('should "storeComponent" call twice (2 components) container method "addComponent"', () => {
-    const expectation = mockContainer.expects('addComponent').twice();
-    const stub = sinon.stub(scanner, 'storeExportedComponent');
+  it('should "insertProvider" call twice (2 components) container method "addProvider"', async () => {
+    const expectation = mockContainer.expects('addProvider').twice();
+    const stub = sinon.stub(scanner, 'insertExportedProvider');
 
-    scanner.scan(TestModule as any);
+    await scanner.scan(TestModule as any);
     expectation.verify();
     stub.restore();
   });
 
-  it('should "storeRoute" call twice (2 components) container method "addController"', () => {
+  it('should "insertController" call twice (2 components) container method "addController"', async () => {
     const expectation = mockContainer.expects('addController').twice();
-    scanner.scan(TestModule as any);
+    await scanner.scan(TestModule as any);
     expectation.verify();
   });
 
-  it('should "storeExportedComponent" call once (1 component) container method "addExportedComponent"', () => {
-    const expectation = mockContainer.expects('addExportedComponent').once();
-    scanner.scan(TestModule as any);
+  it('should "insertExportedProvider" call once (1 component) container method "addExportedProvider"', async () => {
+    const expectation = mockContainer.expects('addExportedProvider').once();
+    await scanner.scan(TestModule as any);
     expectation.verify();
   });
 
@@ -113,7 +117,7 @@ describe('DependenciesScanner', () => {
     });
   });
 
-  describe('storeInjectable', () => {
+  describe('insertInjectable', () => {
     it('should call "addInjectable"', () => {
       const addInjectable = sinon
         .stub((scanner as any).container, 'addInjectable')
@@ -121,7 +125,7 @@ describe('DependenciesScanner', () => {
       const comp = {};
       const token = 'token';
 
-      scanner.storeInjectable(comp as any, token);
+      scanner.insertInjectable(comp as any, token, null);
       expect(addInjectable.calledWith(comp, token)).to.be.true;
     });
   });
@@ -145,73 +149,86 @@ describe('DependenciesScanner', () => {
     });
   });
 
-  describe('storeModule', () => {
+  describe('insertModule', () => {
     it('should call forwardRef() when forwardRef property exists', () => {
       const module = { forwardRef: sinon.spy() };
 
-      sinon.stub(container, 'addModule').returns({});
-      scanner.storeModule(module as any, [] as any);
+      sinon.stub(container, 'addModule').returns({} as any);
+      scanner.insertModule(module as any, [] as any);
       expect(module.forwardRef.called).to.be.true;
     });
   });
 
-  describe('storeRelatedModule', () => {
-    it('should call forwardRef() when forwardRef property exists', () => {
+  describe('insertImport', () => {
+    it('should call forwardRef() when forwardRef property exists', async () => {
       const module = { forwardRef: sinon.stub().returns({}) };
 
-      sinon.stub(container, 'addRelatedModule').returns({});
-      scanner.storeRelatedModule(module as any, [] as any, 'test');
+      sinon.stub(container, 'addImport').returns({} as any);
+      await scanner.insertImport(module as any, [] as any, 'test');
       expect(module.forwardRef.called).to.be.true;
     });
     describe('when "related" is nil', () => {
       it('should throw exception', () => {
-        expect(() =>
-          scanner.storeRelatedModule(undefined, [] as any, 'test'),
-        ).to.throws();
+        scanner
+          .insertImport(undefined, [] as any, 'test')
+          .catch(err => expect(err).to.not.be.undefined);
       });
     });
   });
 
-  describe('storeComponent', () => {
+  describe('insertProvider', () => {
     const token = 'token';
 
-    describe('when component is not custom', () => {
-      it('should call container "addComponent" with expected args', () => {
-        const component = {};
+    describe('when provider is not custom', () => {
+      it('should call container "addProvider" with expected args', () => {
+        const provider = {};
         const expectation = mockContainer
-          .expects('addComponent')
-          .withArgs(component, token);
+          .expects('addProvider')
+          .withArgs(provider, token);
 
-        mockContainer.expects('addComponent').callsFake(() => false);
-        scanner.storeComponent(component, token);
+        mockContainer.expects('addProvider').callsFake(() => false);
+        scanner.insertProvider(provider as any, token);
 
         expectation.verify();
       });
     });
-    describe('when component is custom', () => {
+    describe('when provider is custom', () => {
       describe('and is global', () => {
-        const component = {
+        const provider = {
           provide: APP_INTERCEPTOR,
           useValue: true,
         };
 
-        it('should call container "addComponent" with expected args', () => {
-          const expectation = mockContainer
-            .expects('addComponent')
-            .withArgs(component, token);
+        it('should call container "addProvider" with expected args', () => {
+          const expectation = mockContainer.expects('addProvider').atLeast(1);
 
-          mockContainer.expects('addComponent').callsFake(() => false);
-          scanner.storeComponent(component, token);
+          mockContainer.expects('addProvider').callsFake(() => false);
+          scanner.insertProvider(provider, token);
 
           expectation.verify();
         });
         it('should push new object to "applicationProvidersApplyMap" array', () => {
-          mockContainer.expects('addComponent').callsFake(() => false);
-          scanner.storeComponent(component, token);
+          mockContainer.expects('addProvider').callsFake(() => false);
+          scanner.insertProvider(provider, token);
           const applyMap = (scanner as any).applicationProvidersApplyMap;
 
           expect(applyMap).to.have.length(1);
-          expect(applyMap[0].moduleToken).to.be.eql(token);
+          expect(applyMap[0].moduleKey).to.be.eql(token);
+        });
+      });
+      describe('and is global and request/transient scoped', () => {
+        const provider = {
+          provide: APP_INTERCEPTOR,
+          useValue: true,
+          scope: Scope.REQUEST,
+        };
+        it('should call container "addInjectable" with expected args', () => {
+          const expectation = mockContainer.expects('addInjectable').atLeast(1);
+
+          mockContainer.expects('addInjectable').callsFake(() => false);
+          scanner.insertProvider(provider, token);
+
+          expectation.verify();
         });
       });
       describe('and is not global', () => {
@@ -219,13 +236,13 @@ describe('DependenciesScanner', () => {
           provide: 'CUSTOM',
           useValue: true,
         };
-        it('should call container "addComponent" with expected args', () => {
+        it('should call container "addProvider" with expected args', () => {
           const expectation = mockContainer
-            .expects('addComponent')
+            .expects('addProvider')
             .withArgs(component, token);
 
-          mockContainer.expects('addComponent').callsFake(() => false);
-          scanner.storeComponent(component, token);
+          mockContainer.expects('addProvider').callsFake(() => false);
+          scanner.insertProvider(component, token);
 
           expectation.verify();
         });
@@ -234,8 +251,8 @@ describe('DependenciesScanner', () => {
             0,
           );
 
-          mockContainer.expects('addComponent').callsFake(() => false);
-          scanner.storeComponent(component, token);
+          mockContainer.expects('addProvider').callsFake(() => false);
+          scanner.insertProvider(component, token);
           expect((scanner as any).applicationProvidersApplyMap).to.have.length(
             0,
           );
@@ -246,26 +263,87 @@ describe('DependenciesScanner', () => {
   describe('applyApplicationProviders', () => {
     it('should apply each provider', () => {
       const provider = {
-        moduleToken: 'moduleToken',
-        providerToken: 'providerToken',
+        moduleKey: 'moduleToken',
+        providerKey: 'providerToken',
+        type: APP_GUARD,
       };
       (scanner as any).applicationProvidersApplyMap = [provider];
 
       const expectedInstance = {};
       mockContainer.expects('getModules').callsFake(() => ({
         get: () => ({
-          components: { get: () => ({ instance: expectedInstance }) },
+          providers: { get: () => ({ instance: expectedInstance }) },
         }),
       }));
       const applySpy = sinon.spy();
       sinon.stub(scanner, 'getApplyProvidersMap').callsFake(() => ({
-        [provider.providerToken]: applySpy,
+        [provider.type]: applySpy,
       }));
       scanner.applyApplicationProviders();
       expect(applySpy.called).to.be.true;
       expect(applySpy.calledWith(expectedInstance)).to.be.true;
     });
+    it('should apply each globally scoped provider', () => {
+      const provider = {
+        moduleKey: 'moduleToken',
+        providerKey: 'providerToken',
+        type: APP_GUARD,
+        scope: Scope.REQUEST,
+      };
+      (scanner as any).applicationProvidersApplyMap = [provider];
+
+      const expectedInstanceWrapper = new InstanceWrapper();
+      mockContainer.expects('getModules').callsFake(() => ({
+        get: () => ({
+          injectables: { get: () => expectedInstanceWrapper },
+        }),
+      }));
+      const applySpy = sinon.spy();
+      sinon.stub(scanner, 'getApplyRequestProvidersMap').callsFake(() => ({
+        [provider.type]: applySpy,
+      }));
+      scanner.applyApplicationProviders();
+      expect(applySpy.called).to.be.true;
+      expect(applySpy.calledWith(expectedInstanceWrapper)).to.be.true;
+    });
   });
+
+  describe('addScopedEnhancersMetadata', () => {
+    const provider = {
+      moduleKey: 'moduleToken',
+      providerKey: 'providerToken',
+      type: APP_GUARD,
+      scope: Scope.REQUEST,
+    };
+
+    it('should add enhancers metadata to every controller', () => {
+      (scanner as any).applicationProvidersApplyMap = [provider];
+
+      const instance = new InstanceWrapper({ name: 'test' });
+      const controllers = new Map();
+      const mockController = new InstanceWrapper();
+
+      controllers.set('test', mockController);
+      mockContainer.expects('getModules').callsFake(() => ({
+        get: () => ({
+          injectables: { get: () => instance },
+          controllers,
+        }),
+        values() {
+          return [this.get()];
+        },
+      }));
+      const addEnhancerMetadataSpy = sinon.spy(
+        mockController,
+        'addEnhancerMetadata',
+      );
+      scanner.addScopedEnhancersMetadata();
+
+      expect(addEnhancerMetadataSpy.called).to.be.true;
+      expect(addEnhancerMetadataSpy.calledWith(instance)).to.be.true;
+    });
+  });
+
   describe('getApplyProvidersMap', () => {
     describe(`when token is ${APP_INTERCEPTOR}`, () => {
       it('call "addGlobalInterceptor"', () => {
@@ -304,6 +382,48 @@ describe('DependenciesScanner', () => {
           'addGlobalFilter',
         );
         scanner.getApplyProvidersMap()[APP_FILTER](null);
+        expect(addSpy.called).to.be.true;
+      });
+    });
+  });
+  describe('getApplyRequestProvidersMap', () => {
+    describe(`when token is ${APP_INTERCEPTOR}`, () => {
+      it('call "addGlobalRequestInterceptor"', () => {
+        const addSpy = sinon.spy(
+          (scanner as any).applicationConfig,
+          'addGlobalRequestInterceptor',
+        );
+        scanner.getApplyRequestProvidersMap()[APP_INTERCEPTOR](null);
+        expect(addSpy.called).to.be.true;
+      });
+    });
+    describe(`when token is ${APP_GUARD}`, () => {
+      it('call "addGlobalRequestGuard"', () => {
+        const addSpy = sinon.spy(
+          (scanner as any).applicationConfig,
+          'addGlobalRequestGuard',
+        );
+        scanner.getApplyRequestProvidersMap()[APP_GUARD](null);
+        expect(addSpy.called).to.be.true;
+      });
+    });
+    describe(`when token is ${APP_PIPE}`, () => {
+      it('call "addGlobalRequestPipe"', () => {
+        const addSpy = sinon.spy(
+          (scanner as any).applicationConfig,
+          'addGlobalRequestPipe',
+        );
+        scanner.getApplyRequestProvidersMap()[APP_PIPE](null);
+        expect(addSpy.called).to.be.true;
+      });
+    });
+    describe(`when token is ${APP_FILTER}`, () => {
+      it('call "addGlobalRequestFilter"', () => {
+        const addSpy = sinon.spy(
+          (scanner as any).applicationConfig,
+          'addGlobalRequestFilter',
+        );
+        scanner.getApplyRequestProvidersMap()[APP_FILTER](null);
         expect(addSpy.called).to.be.true;
       });
     });

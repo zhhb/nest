@@ -1,30 +1,30 @@
-import { isFunction } from '@nestjs/common/utils/shared.utils';
 import { Type } from '@nestjs/common/interfaces';
+import { isFunction } from '@nestjs/common/utils/shared.utils';
+import * as uuid from 'uuid/v4';
 
-export const filterMiddleware = middleware => {
+export const filterMiddleware = <T>(middleware: T[]) => {
   return []
     .concat(middleware)
     .filter(isFunction)
-    .map(ware => mapToClass(ware));
+    .map(mapToClass);
 };
 
-export const mapToClass = middleware => {
-  if (this.isClass(middleware)) {
+export const mapToClass = <T extends Function | Type<any>>(middleware: T) => {
+  if (isClass(middleware)) {
     return middleware;
   }
   return assignToken(
     class {
-      resolve = (...args) => (...params) => middleware(...params);
+      use = (...params: any[]) => (middleware as Function)(...params);
     },
   );
 };
 
-export const isClass = middleware => {
+export function isClass(middleware: any) {
   return middleware.toString().substring(0, 5) === 'class';
-};
+}
 
-export const assignToken = (metatype): Type<any> => {
-  this.id = this.id || 1;
-  Object.defineProperty(metatype, 'name', { value: ++this.id });
+export function assignToken(metatype: Type<any>): Type<any> {
+  Object.defineProperty(metatype, 'name', { value: uuid() });
   return metatype;
-};
+}

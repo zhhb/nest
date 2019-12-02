@@ -1,17 +1,21 @@
-import * as sinon from 'sinon';
 import { expect } from 'chai';
-import { PipesContextCreator } from './../../pipes/pipes-context-creator';
+import * as sinon from 'sinon';
+import { ApplicationConfig } from '../../application-config';
 import { NestContainer } from '../../injector/container';
+import { InstanceWrapper } from '../../injector/instance-wrapper';
+import { PipesContextCreator } from '../../pipes/pipes-context-creator';
 
 class Pipe {}
 
 describe('PipesContextCreator', () => {
   let creator: PipesContextCreator;
   let container: NestContainer;
+  let applicationConfig: ApplicationConfig;
 
   beforeEach(() => {
     container = new NestContainer();
-    creator = new PipesContextCreator(container);
+    applicationConfig = new ApplicationConfig();
+    creator = new PipesContextCreator(container, applicationConfig);
   });
   describe('createConcreteContext', () => {
     describe('when metadata is empty or undefined', () => {
@@ -37,7 +41,10 @@ describe('PipesContextCreator', () => {
     });
     describe('when param is a constructor', () => {
       it('should pick instance from container', () => {
-        const wrapper = { instance: 'test' };
+        const wrapper: InstanceWrapper = {
+          instance: 'test',
+          getInstanceByContextId: () => wrapper,
+        } as any;
         sinon.stub(creator, 'getInstanceByMetatype').callsFake(() => wrapper);
         expect(creator.getPipeInstance(Pipe)).to.be.eql(wrapper.instance);
       });
@@ -71,9 +78,45 @@ describe('PipesContextCreator', () => {
         it('should return instance', () => {
           const instance = { test: true };
           const module = { injectables: { get: () => instance } };
-          sinon.stub(container.getModules(), 'get').callsFake(() => module);
-          expect(creator.getInstanceByMetatype({})).to.be.eql(instance);
+          sinon
+            .stub(container.getModules(), 'get')
+            .callsFake(() => module as any);
+          expect(creator.getInstanceByMetatype({ name: 'test' })).to.be.eql(
+            instance,
+          );
         });
+      });
+    });
+  });
+
+  describe('getGlobalMetadata', () => {
+    describe('when contextId is static and inquirerId is nil', () => {
+      it('should return global pipes', () => {
+        const expectedResult = applicationConfig.getGlobalPipes();
+        expect(creator.getGlobalMetadata()).to.be.equal(expectedResult);
+      });
+    });
+    describe('otherwise', () => {
+      it('should merge static global with request/transient scoped pipes', () => {
+        const globalPipes: any = ['test'];
+        const instanceWrapper = new InstanceWrapper();
+        const instance = 'request-scoped';
+        const scopedPipeWrappers = [instanceWrapper];
+
+        sinon
+          .stub(applicationConfig, 'getGlobalPipes')
+          .callsFake(() => globalPipes);
+        sinon
+          .stub(applicationConfig, 'getGlobalRequestPipes')
+          .callsFake(() => scopedPipeWrappers);
+        sinon
+          .stub(instanceWrapper, 'getInstanceByContextId')
+          .callsFake(() => ({ instance } as any));
+
+        expect(creator.getGlobalMetadata({ id: 3 })).to.contains(
+          instance,
+          ...globalPipes,
+        );
       });
     });
   });

@@ -1,119 +1,128 @@
-import { DependenciesScanner } from './scanner';
-import { InstanceLoader } from './injector/instance-loader';
-import { NestContainer } from './injector/container';
-import { ExceptionsZone } from './errors/exceptions-zone';
-import { Logger } from '@nestjs/common/services/logger.service';
-import { NestApplicationOptions } from '@nestjs/common/interfaces/nest-application-options.interface';
-import { messages } from './constants';
-import { NestApplication } from './nest-application';
-import { isFunction } from '@nestjs/common/utils/shared.utils';
-import { ExpressFactory } from './adapters/express-factory';
 import {
-  INestApplication,
-  INestMicroservice,
-  INestApplicationContext,
   HttpServer,
+  INestApplication,
+  INestApplicationContext,
+  INestMicroservice,
 } from '@nestjs/common';
-import { MetadataScanner } from './metadata-scanner';
-import { NestApplicationContext } from './nest-application-context';
-import { HttpsOptions } from '@nestjs/common/interfaces/external/https-options.interface';
-import { NestApplicationContextOptions } from '@nestjs/common/interfaces/nest-application-context-options.interface';
-import { NestMicroserviceOptions } from '@nestjs/common/interfaces/microservices/nest-microservice-options.interface';
-import { ApplicationConfig } from './application-config';
-import { ExpressAdapter } from './adapters/express-adapter';
-import { INestExpressApplication } from '@nestjs/common/interfaces/nest-express-application.interface';
-import { FastifyAdapter } from './adapters/fastify-adapter';
-import { INestFastifyApplication } from '@nestjs/common/interfaces/nest-fastify-application.interface';
 import { MicroserviceOptions } from '@nestjs/common/interfaces/microservices/microservice-configuration.interface';
+import { NestMicroserviceOptions } from '@nestjs/common/interfaces/microservices/nest-microservice-options.interface';
+import { NestApplicationContextOptions } from '@nestjs/common/interfaces/nest-application-context-options.interface';
+import { NestApplicationOptions } from '@nestjs/common/interfaces/nest-application-options.interface';
+import { Logger } from '@nestjs/common/services/logger.service';
 import { loadPackage } from '@nestjs/common/utils/load-package.util';
+import { isFunction, isNil } from '@nestjs/common/utils/shared.utils';
+import { AbstractHttpAdapter } from './adapters/http-adapter';
+import { ApplicationConfig } from './application-config';
+import { MESSAGES } from './constants';
+import { ExceptionsZone } from './errors/exceptions-zone';
+import { loadAdapter } from './helpers/load-adapter';
+import { NestContainer } from './injector/container';
+import { InstanceLoader } from './injector/instance-loader';
+import { MetadataScanner } from './metadata-scanner';
+import { NestApplication } from './nest-application';
+import { NestApplicationContext } from './nest-application-context';
+import { DependenciesScanner } from './scanner';
 
+/**
+ * @publicApi
+ */
 export class NestFactoryStatic {
   private readonly logger = new Logger('NestFactory', true);
   /**
-   * Creates an instance of the NestApplication
-   * @returns {Promise}
+   * Creates an instance of NestApplication.
+   *
+   * @param module Entry (root) application module class
+   * @param options List of options to initialize NestApplication
+   *
+   * @returns A promise that, when resolved,
+   * contains a reference to the NestApplication instance.
    */
-  public async create(
+  public async create<T extends INestApplication = INestApplication>(
     module: any,
-  ): Promise<INestApplication & INestExpressApplication>;
-  public async create(
-    module: any,
-    options: NestApplicationOptions,
-  ): Promise<INestApplication & INestExpressApplication>;
-  public async create(
-    module: any,
-    httpServer: FastifyAdapter,
     options?: NestApplicationOptions,
-  ): Promise<INestApplication & INestFastifyApplication>;
-  public async create(
+  ): Promise<T>;
+  /**
+   * Creates an instance of NestApplication with the specified `httpAdapter`.
+   *
+   * @param module Entry (root) application module class
+   * @param httpAdapter Adapter to proxy the request/response cycle to
+   *    the underlying HTTP server
+   * @param options List of options to initialize NestApplication
+   *
+   * @returns A promise that, when resolved,
+   * contains a reference to the NestApplication instance.
+   */
+  public async create<T extends INestApplication = INestApplication>(
     module: any,
-    httpServer: HttpServer,
+    httpAdapter: AbstractHttpAdapter,
     options?: NestApplicationOptions,
-  ): Promise<INestApplication & INestExpressApplication>;
-  public async create(
+  ): Promise<T>;
+  public async create<T extends INestApplication = INestApplication>(
     module: any,
-    httpServer: any,
+    serverOrOptions?: AbstractHttpAdapter | NestApplicationOptions,
     options?: NestApplicationOptions,
-  ): Promise<INestApplication & INestExpressApplication>;
-  public async create(
-    module: any,
-    serverOrOptions?: any,
-    options?: NestApplicationOptions,
-  ): Promise<
-    INestApplication & (INestExpressApplication | INestFastifyApplication)
-  > {
-    const isHttpServer = serverOrOptions && serverOrOptions.patch;
+  ): Promise<T> {
     // tslint:disable-next-line:prefer-const
-    let [httpServer, appOptions] = isHttpServer
+    let [httpServer, appOptions] = this.isHttpServer(serverOrOptions)
       ? [serverOrOptions, options]
-      : [ExpressFactory.create(), serverOrOptions];
+      : [this.createHttpAdapter(), serverOrOptions];
 
     const applicationConfig = new ApplicationConfig();
     const container = new NestContainer(applicationConfig);
-    httpServer = this.applyExpressAdapter(httpServer);
 
     this.applyLogger(appOptions);
     await this.initialize(module, container, applicationConfig, httpServer);
-    return this.createNestInstance<NestApplication>(
-      new NestApplication(container, httpServer, applicationConfig, appOptions),
+
+    const instance = new NestApplication(
+      container,
+      httpServer,
+      applicationConfig,
+      appOptions,
     );
+    const target = this.createNestInstance(instance);
+    return this.createAdapterProxy<T>(target, httpServer);
   }
 
   /**
-   * Creates an instance of the NestMicroservice
+   * Creates an instance of NestMicroservice.
    *
-   * @param  {} module Entry (root) application module class
-   * @param  {NestMicroserviceOptions & MicroserviceOptions} options Optional microservice configuration
-   * @returns {Promise}
+   * @param module Entry (root) application module class
+   * @param options Optional microservice configuration
+   *
+   * @returns A promise that, when resolved,
+   * contains a reference to the NestMicroservice instance.
    */
   public async createMicroservice(
-    module,
+    module: any,
     options?: NestMicroserviceOptions & MicroserviceOptions,
   ): Promise<INestMicroservice> {
     const { NestMicroservice } = loadPackage(
       '@nestjs/microservices',
       'NestFactory',
+      () => require('@nestjs/microservices'),
     );
-
     const applicationConfig = new ApplicationConfig();
     const container = new NestContainer(applicationConfig);
 
     this.applyLogger(options);
+
     await this.initialize(module, container, applicationConfig);
     return this.createNestInstance<INestMicroservice>(
-      new NestMicroservice(container, options as any, applicationConfig),
+      new NestMicroservice(container, options, applicationConfig),
     );
   }
 
   /**
-   * Creates an instance of the NestApplicationContext
+   * Creates an instance of NestApplicationContext.
    *
-   * @param  {} module Entry (root) application module class
-   * @param  {NestApplicationContextOptions} options Optional Nest application configuration
-   * @returns {Promise}
+   * @param module Entry (root) application module class
+   * @param options Optional Nest application configuration
+   *
+   * @returns A promise that, when resolved,
+   * contains a reference to the NestApplicationContext instance.
    */
   public async createApplicationContext(
-    module,
+    module: any,
     options?: NestApplicationContextOptions,
   ): Promise<INestApplicationContext> {
     const container = new NestContainer();
@@ -126,7 +135,7 @@ export class NestFactoryStatic {
     const context = this.createNestInstance<NestApplicationContext>(
       new NestApplicationContext(container, [], root),
     );
-    return await context.init();
+    return context.init();
   }
 
   private createNestInstance<T>(instance: T): T {
@@ -134,7 +143,7 @@ export class NestFactoryStatic {
   }
 
   private async initialize(
-    module,
+    module: any,
     container: NestContainer,
     config = new ApplicationConfig(),
     httpServer: HttpServer = null,
@@ -145,11 +154,11 @@ export class NestFactoryStatic {
       new MetadataScanner(),
       config,
     );
-    container.setApplicationRef(httpServer);
+    container.setHttpAdapter(httpServer);
     try {
-      this.logger.log(messages.APPLICATION_START);
+      this.logger.log(MESSAGES.APPLICATION_START);
       await ExceptionsZone.asyncRun(async () => {
-        dependenciesScanner.scan(module);
+        await dependenciesScanner.scan(module);
         await instanceLoader.createInstancesOfDependencies();
         dependenciesScanner.applyApplicationProviders();
       });
@@ -158,7 +167,7 @@ export class NestFactoryStatic {
     }
   }
 
-  private createProxy(target) {
+  private createProxy(target: any) {
     const proxy = this.createExceptionProxy();
     return new Proxy(target, {
       get: proxy,
@@ -167,36 +176,77 @@ export class NestFactoryStatic {
   }
 
   private createExceptionProxy() {
-    return (receiver, prop) => {
-      if (!(prop in receiver)) return;
-
+    return (receiver: Record<string, any>, prop: string) => {
+      if (!(prop in receiver)) {
+        return;
+      }
       if (isFunction(receiver[prop])) {
-        return (...args) => {
-          let result;
-          ExceptionsZone.run(() => {
-            result = receiver[prop](...args);
-          });
-          return result;
-        };
+        return this.createExceptionZone(receiver, prop);
       }
       return receiver[prop];
     };
   }
 
-  private applyLogger(options: NestApplicationContextOptions | undefined) {
-    if (!options || !options.logger) {
-      return;
-    }
-    Logger.overrideLogger(options.logger);
+  private createExceptionZone(
+    receiver: Record<string, any>,
+    prop: string,
+  ): Function {
+    return (...args: unknown[]) => {
+      let result;
+      ExceptionsZone.run(() => {
+        result = receiver[prop](...args);
+      });
+      return result;
+    };
   }
 
-  private applyExpressAdapter(httpAdapter: HttpServer): HttpServer {
-    const isAdapter = httpAdapter.getHttpServer;
-    if (isAdapter) {
-      return httpAdapter;
+  private applyLogger(options: NestApplicationContextOptions | undefined) {
+    if (!options) {
+      return;
     }
-    return new ExpressAdapter(httpAdapter);
+    !isNil(options.logger) && Logger.overrideLogger(options.logger);
+  }
+
+  private createHttpAdapter<T = any>(httpServer?: T): AbstractHttpAdapter {
+    const { ExpressAdapter } = loadAdapter(
+      '@nestjs/platform-express',
+      'HTTP',
+      () => require('@nestjs/platform-express'),
+    );
+    return new ExpressAdapter(httpServer);
+  }
+
+  private isHttpServer(
+    serverOrOptions: AbstractHttpAdapter | NestApplicationOptions,
+  ): serverOrOptions is AbstractHttpAdapter {
+    return !!(
+      serverOrOptions && (serverOrOptions as AbstractHttpAdapter).patch
+    );
+  }
+
+  private createAdapterProxy<T>(app: NestApplication, adapter: HttpServer): T {
+    return (new Proxy(app, {
+      get: (receiver: Record<string, any>, prop: string) => {
+        if (!(prop in receiver) && prop in adapter) {
+          return this.createExceptionZone(adapter, prop);
+        }
+        return receiver[prop];
+      },
+    }) as unknown) as T;
   }
 }
 
+/**
+ * Use NestFactory to create an application instance.
+ *
+ * ### Specifying an entry module
+ *
+ * Pass the required *root module* for the application via the module parameter.
+ * By convention, it is usually called `ApplicationModule`.  Starting with this
+ * module, Nest assembles the dependency graph and begins the process of
+ * Dependency Injection and instantiates the classes needed to launch your
+ * application.
+ *
+ * @publicApi
+ */
 export const NestFactory = new NestFactoryStatic();

@@ -1,19 +1,43 @@
-import { Observable, Observer, throwError as _throw } from 'rxjs';
+import { randomStringGenerator } from '@nestjs/common/utils/random-string-generator.util';
 import { isNil } from '@nestjs/common/utils/shared.utils';
-import { InvalidMessageException } from '../exceptions/invalid-message.exception';
 import {
-  ReadPacket,
-  PacketId,
-  WritePacket,
+  ConnectableObservable,
+  defer,
+  fromEvent,
+  merge,
+  Observable,
+  Observer,
+  throwError as _throw,
+} from 'rxjs';
+import { map, mergeMap, publish, take } from 'rxjs/operators';
+import { CONNECT_EVENT, ERROR_EVENT } from '../constants';
+import { IncomingResponseDeserializer } from '../deserializers/incoming-response.deserializer';
+import { InvalidMessageException } from '../errors/invalid-message.exception';
+import {
   ClientOptions,
-} from './../interfaces';
-import { fromEvent, merge } from 'rxjs';
-import { map, take, tap } from 'rxjs/operators';
-import { ERROR_EVENT, CONNECT_EVENT } from '../constants';
+  MqttOptions,
+  MsPattern,
+  NatsOptions,
+  PacketId,
+  ReadPacket,
+  RedisOptions,
+  RmqOptions,
+  KafkaOptions,
+  TcpClientOptions,
+  WritePacket,
+} from '../interfaces';
+import { ProducerDeserializer } from '../interfaces/deserializer.interface';
+import { ProducerSerializer } from '../interfaces/serializer.interface';
+import { IdentitySerializer } from '../serializers/identity.serializer';
+import { transformPatternToRoute } from '../utils';
 
 export abstract class ClientProxy {
   public abstract connect(): Promise<any>;
   public abstract close(): any;
+
+  protected routingMap = new Map<string, Function>();
+  protected serializer: ProducerSerializer;
+  protected deserializer: ProducerDeserializer;
 
   public send<TResult = any, TInput = any>(
     pattern: any,
@@ -22,15 +46,38 @@ export abstract class ClientProxy {
     if (isNil(pattern) || isNil(data)) {
       return _throw(new InvalidMessageException());
     }
-    return new Observable((observer: Observer<TResult>) => {
-      this.publish({ pattern, data }, this.createObserver(observer));
-    });
+    return defer(async () => this.connect()).pipe(
+      mergeMap(
+        () =>
+          new Observable((observer: Observer<TResult>) => {
+            const callback = this.createObserver(observer);
+            return this.publish({ pattern, data }, callback);
+          }),
+      ),
+    );
+  }
+
+  public emit<TResult = any, TInput = any>(
+    pattern: any,
+    data: TInput,
+  ): Observable<TResult> {
+    if (isNil(pattern) || isNil(data)) {
+      return _throw(new InvalidMessageException());
+    }
+    const source = defer(async () => this.connect()).pipe(
+      mergeMap(() => this.dispatchEvent({ pattern, data })),
+      publish(),
+    );
+    (source as ConnectableObservable<TResult>).connect();
+    return source;
   }
 
   protected abstract publish(
     packet: ReadPacket,
     callback: (packet: WritePacket) => void,
-  );
+  ): Function;
+
+  protected abstract dispatchEvent<T = any>(packet: ReadPacket): Promise<T>;
 
   protected createObserver<T>(
     observer: Observer<T>,
@@ -38,6 +85,9 @@ export abstract class ClientProxy {
     return ({ err, response, isDisposed }: WritePacket) => {
       if (err) {
         return observer.error(err);
+      } else if (response && isDisposed) {
+        observer.next(response);
+        return observer.complete();
       } else if (isDisposed) {
         return observer.complete();
       }
@@ -46,10 +96,7 @@ export abstract class ClientProxy {
   }
 
   protected assignPacketId(packet: ReadPacket): ReadPacket & PacketId {
-    const id =
-      Math.random()
-        .toString(36)
-        .substr(2, 5) + Date.now();
+    const id = randomStringGenerator();
     return Object.assign(packet, { id });
   }
 
@@ -59,7 +106,7 @@ export abstract class ClientProxy {
     connectEvent = CONNECT_EVENT,
   ): Observable<any> {
     const error$ = fromEvent(instance, errorEvent).pipe(
-      map(err => {
+      map((err: any) => {
         throw err;
       }),
     );
@@ -67,11 +114,40 @@ export abstract class ClientProxy {
     return merge(error$, connect$).pipe(take(1));
   }
 
-  protected getOptionsProp<T extends { options? }>(
-    obj: ClientOptions,
-    prop: keyof T['options'],
-    defaultValue = undefined,
-  ) {
-    return obj && obj.options ? obj.options[prop as any] : defaultValue;
+  protected getOptionsProp<
+    T extends ClientOptions['options'],
+    K extends keyof T
+  >(obj: T, prop: K, defaultValue: T[K] = undefined) {
+    return (obj && obj[prop]) || defaultValue;
+  }
+
+  protected normalizePattern(pattern: MsPattern): string {
+    return transformPatternToRoute(pattern);
+  }
+
+  protected initializeSerializer(options: ClientOptions['options']) {
+    this.serializer =
+      (options &&
+        (options as
+          | RedisOptions['options']
+          | NatsOptions['options']
+          | MqttOptions['options']
+          | TcpClientOptions['options']
+          | RmqOptions['options']
+          | KafkaOptions['options']).serializer) ||
+      new IdentitySerializer();
+  }
+
+  protected initializeDeserializer(options: ClientOptions['options']) {
+    this.deserializer =
+      (options &&
+        (options as
+          | RedisOptions['options']
+          | NatsOptions['options']
+          | MqttOptions['options']
+          | TcpClientOptions['options']
+          | RmqOptions['options']
+          | KafkaOptions['options']).deserializer) ||
+      new IncomingResponseDeserializer();
   }
 }

@@ -1,16 +1,30 @@
-import * as sinon from 'sinon';
-import { expect } from 'chai';
-import { SocketServerProvider } from '../socket-server-provider';
-import { WebSocketsController } from '../web-sockets-controller';
-import { WebSocketGateway } from '../utils/socket-gateway.decorator';
-import { InvalidSocketPortException } from '../exceptions/invalid-socket-port.exception';
-import { GatewayMetadataExplorer } from '../gateway-metadata-explorer';
-import { MetadataScanner } from '../../core/metadata-scanner';
 import { ApplicationConfig } from '@nestjs/core/application-config';
-import { WsContextCreator } from '../context/ws-context-creator';
-import { IoAdapter } from '../index';
-import { Observable, of } from 'rxjs';
+import { expect } from 'chai';
+import { fromEvent, Observable, of } from 'rxjs';
+import * as sinon from 'sinon';
+import { MetadataScanner } from '../../core/metadata-scanner';
+import { AbstractWsAdapter } from '../adapters/ws-adapter';
 import { PORT_METADATA } from '../constants';
+import { WsContextCreator } from '../context/ws-context-creator';
+import { InvalidSocketPortException } from '../errors/invalid-socket-port.exception';
+import { GatewayMetadataExplorer } from '../gateway-metadata-explorer';
+import { SocketServerProvider } from '../socket-server-provider';
+import { WebSocketGateway } from '../decorators/socket-gateway.decorator';
+import { WebSocketsController } from '../web-sockets-controller';
+
+class NoopAdapter extends AbstractWsAdapter {
+  public create(port: number, options?: any) {}
+  public bindMessageHandlers(
+    client: any,
+    handlers,
+    transform: (data: any) => Observable<any>,
+  ) {
+    handlers.forEach(({ message, callback }) => {
+      const source$ = fromEvent(client, message);
+      source$.subscribe(data => null);
+    });
+  }
+}
 
 describe('WebSocketsController', () => {
   let instance: WebSocketsController;
@@ -24,52 +38,52 @@ describe('WebSocketsController', () => {
   class Test {}
 
   beforeEach(() => {
-    config = new ApplicationConfig(new IoAdapter());
+    config = new ApplicationConfig(new NoopAdapter());
     provider = new SocketServerProvider(null, config);
     mockProvider = sinon.mock(provider);
     instance = new WebSocketsController(
       provider,
-      null,
       config,
-      sinon.createStubInstance(WsContextCreator),
+      sinon.createStubInstance(WsContextCreator) as any,
     );
   });
-  describe('hookGatewayIntoServer', () => {
-    let subscribeObservableServer: sinon.SinonSpy;
+  describe('mergeGatewayAndServer', () => {
+    let subscribeToServerEvents: sinon.SinonSpy;
 
-    @WebSocketGateway('test')
+    @WebSocketGateway('test' as any)
     class InvalidGateway {}
 
     @WebSocketGateway()
     class DefaultGateway {}
 
     beforeEach(() => {
-      subscribeObservableServer = sinon.spy();
-      (instance as any).subscribeObservableServer = subscribeObservableServer;
+      subscribeToServerEvents = sinon.spy();
+      (instance as any).subscribeToServerEvents = subscribeToServerEvents;
     });
     it('should throws "InvalidSocketPortException" when port is not a number', () => {
       Reflect.defineMetadata(PORT_METADATA, 'test', InvalidGateway);
       expect(() =>
-        instance.hookGatewayIntoServer(
+        instance.mergeGatewayAndServer(
           new InvalidGateway(),
           InvalidGateway,
           '',
         ),
       ).throws(InvalidSocketPortException);
     });
-    it('should call "subscribeObservableServer" with default values when metadata is empty', () => {
+    it('should call "subscribeToServerEvents" with default values when metadata is empty', () => {
       const gateway = new DefaultGateway();
-      instance.hookGatewayIntoServer(gateway, DefaultGateway, '');
-      expect(subscribeObservableServer.calledWith(gateway, {}, 0, '')).to.be.true;
+      instance.mergeGatewayAndServer(gateway, DefaultGateway, '');
+      expect(subscribeToServerEvents.calledWith(gateway, {}, 0, '')).to.be.true;
     });
-    it('should call "subscribeObservableServer" when metadata is valid', () => {
+    it('should call "subscribeToServerEvents" when metadata is valid', () => {
       const gateway = new Test();
-      instance.hookGatewayIntoServer(gateway, Test, '');
-      expect(subscribeObservableServer.calledWith(gateway, { namespace }, port, '')).to
-        .be.true;
+      instance.mergeGatewayAndServer(gateway, Test, '');
+      expect(
+        subscribeToServerEvents.calledWith(gateway, { namespace }, port, ''),
+      ).to.be.true;
     });
   });
-  describe('subscribeObservableServer', () => {
+  describe('subscribeToServerEvents', () => {
     let explorer: GatewayMetadataExplorer,
       mockExplorer: sinon.SinonMock,
       gateway,
@@ -92,18 +106,15 @@ describe('WebSocketsController', () => {
 
       hookServerToProperties = sinon.spy();
       subscribeEvents = sinon.spy();
-
       (instance as any).hookServerToProperties = hookServerToProperties;
       (instance as any).subscribeEvents = subscribeEvents;
-
-      sinon.stub(instance, 'injectMiddleware').returns(0);
     });
     it('should call "hookServerToProperties" with expected arguments', () => {
-      instance.subscribeObservableServer(gateway, namespace, port, '');
+      instance.subscribeToServerEvents(gateway, namespace, port, '');
       expect(hookServerToProperties.calledWith(gateway, server.server));
     });
     it('should call "subscribeEvents" with expected arguments', () => {
-      instance.subscribeObservableServer(gateway, namespace, port, '');
+      instance.subscribeToServerEvents(gateway, namespace, port, '');
       expect(subscribeEvents.calledWith(gateway, handlers, server));
     });
   });
@@ -138,7 +149,6 @@ describe('WebSocketsController', () => {
         disconnect: {},
         connection: {},
       };
-
       (instance as any).subscribeInitEvent = subscribeInitEvent;
       (instance as any).getConnectionHandler = getConnectionHandler;
       (instance as any).subscribeConnectionEvent = subscribeConnectionEvent;
@@ -222,7 +232,7 @@ describe('WebSocketsController', () => {
       ).to.be.a('function');
     });
     it('should call "next" method of connection object with expected argument', () => {
-      expect(nextSpy.calledWith(client)).to.be.true;
+      expect(nextSpy.calledWith([client])).to.be.true;
     });
     it('should call "subscribeMessages" with expected arguments', () => {
       expect(subscribeMessages.calledWith(handlers, client, gateway)).to.be
@@ -311,9 +321,9 @@ describe('WebSocketsController', () => {
         it('should returns Promise<Observable>', async () => {
           const value = 100;
           expect(
-            await (await instance.pickResult(
-              Promise.resolve(Promise.resolve(value)),
-            )).toPromise(),
+            await (
+              await instance.pickResult(Promise.resolve(Promise.resolve(value)))
+            ).toPromise(),
           ).to.be.eq(100);
         });
       });
@@ -322,9 +332,9 @@ describe('WebSocketsController', () => {
         it('should returns Promise<Observable>', async () => {
           const value = 100;
           expect(
-            await (await instance.pickResult(
-              Promise.resolve(of(value)),
-            )).toPromise(),
+            await (
+              await instance.pickResult(Promise.resolve(of(value)))
+            ).toPromise(),
           ).to.be.eq(100);
         });
       });
@@ -333,9 +343,9 @@ describe('WebSocketsController', () => {
         it('should returns Promise<Observable>', async () => {
           const value = 100;
           expect(
-            await (await instance.pickResult(
-              Promise.resolve(value),
-            )).toPromise(),
+            await (
+              await instance.pickResult(Promise.resolve(value))
+            ).toPromise(),
           ).to.be.eq(100);
         });
       });

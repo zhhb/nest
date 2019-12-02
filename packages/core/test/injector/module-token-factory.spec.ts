@@ -1,7 +1,8 @@
-import * as sinon from 'sinon';
 import { expect } from 'chai';
-import { ModuleTokenFactory } from '../../injector/module-token-factory';
+import stringify from 'fast-safe-stringify';
+import * as hash from 'object-hash';
 import { SingleScope } from '../../../common';
+import { ModuleTokenFactory } from '../../injector/module-token-factory';
 
 describe('ModuleTokenFactory', () => {
   let factory: ModuleTokenFactory;
@@ -12,9 +13,9 @@ describe('ModuleTokenFactory', () => {
     class Module {}
     it('should force global scope when it is not set', () => {
       const scope = 'global';
-      const token = factory.create(Module as any, [Module as any], undefined);
+      const token = factory.create(Module as any, [Module], undefined);
       expect(token).to.be.deep.eq(
-        JSON.stringify({
+        hash({
           module: Module.name,
           dynamic: '',
           scope,
@@ -22,13 +23,10 @@ describe('ModuleTokenFactory', () => {
       );
     });
     it('should returns expected token', () => {
-      const token = factory.create(
-        SingleScope()(Module) as any,
-        [Module as any],
-        undefined,
-      );
+      const type = SingleScope()(Module) as any;
+      const token = factory.create(type, [Module], undefined);
       expect(token).to.be.deep.eq(
-        JSON.stringify({
+        hash({
           module: Module.name,
           dynamic: '',
           scope: [Module.name],
@@ -36,18 +34,15 @@ describe('ModuleTokenFactory', () => {
       );
     });
     it('should include dynamic metadata', () => {
-      const token = factory.create(
-        SingleScope()(Module) as any,
-        [Module as any],
-        {
-          components: [{}],
-        } as any,
-      );
+      const type = SingleScope()(Module) as any;
+      const token = factory.create(type as any, [Module], {
+        providers: [{}],
+      } as any);
       expect(token).to.be.deep.eq(
-        JSON.stringify({
+        hash({
           module: Module.name,
-          dynamic: JSON.stringify({
-            components: [{}],
+          dynamic: stringify({
+            providers: [{}],
           }),
           scope: [Module.name],
         }),
@@ -62,10 +57,17 @@ describe('ModuleTokenFactory', () => {
   });
   describe('getDynamicMetadataToken', () => {
     describe('when metadata exists', () => {
-      it('should return stringified metadata', () => {
-        const metadata = { components: ['', {}] };
+      it('should return hash', () => {
+        const metadata = { providers: ['', {}] };
         expect(factory.getDynamicMetadataToken(metadata as any)).to.be.eql(
           JSON.stringify(metadata),
+        );
+      });
+      it('should return hash with class', () => {
+        class Provider {}
+        const metadata = { providers: [Provider], exports: [Provider] };
+        expect(factory.getDynamicMetadataToken(metadata)).to.be.eql(
+          '{"providers":["Provider"],"exports":["Provider"]}',
         );
       });
     });

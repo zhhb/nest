@@ -1,33 +1,35 @@
-import iterate from 'iterare';
 import { Injectable } from '@nestjs/common/interfaces/injectable.interface';
 import {
   isConstructor,
   isFunction,
   isNil,
 } from '@nestjs/common/utils/shared.utils';
+import iterate from 'iterare';
 
 export class MetadataScanner {
-  public scanFromPrototype<T extends Injectable, R>(
+  public scanFromPrototype<T extends Injectable, R = any>(
     instance: T,
-    prototype,
+    prototype: any,
     callback: (name: string) => R,
   ): R[] {
-    return iterate([...this.getAllFilteredMethodNames(prototype)])
+    const methodNames = new Set(this.getAllFilteredMethodNames(prototype));
+    return iterate(methodNames)
       .map(callback)
       .filter(metadata => !isNil(metadata))
       .toArray();
   }
 
-  *getAllFilteredMethodNames(prototype): IterableIterator<string> {
+  *getAllFilteredMethodNames(prototype: any): IterableIterator<string> {
+    const isMethod = (prop: string) => {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, prop);
+      if (descriptor.set || descriptor.get) {
+        return false;
+      }
+      return !isConstructor(prop) && isFunction(prototype[prop]);
+    };
     do {
       yield* iterate(Object.getOwnPropertyNames(prototype))
-        .filter(prop => {
-          const descriptor = Object.getOwnPropertyDescriptor(prototype, prop);
-          if (descriptor.set || descriptor.get) {
-            return false;
-          }
-          return !isConstructor(prop) && isFunction(prototype[prop]);
-        })
+        .filter(isMethod)
         .toArray();
     } while (
       // tslint:disable-next-line:no-conditional-assignment

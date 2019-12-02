@@ -1,9 +1,8 @@
-import 'reflect-metadata';
 import { expect } from 'chai';
 import { GLOBAL_MODULE_METADATA } from '../../constants';
 import { Global } from '../../index';
 
-describe('Global', () => {
+describe('@Global', () => {
   @Global()
   class Test {}
 

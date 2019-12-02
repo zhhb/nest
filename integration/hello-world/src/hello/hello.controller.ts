@@ -1,6 +1,6 @@
-import { HelloService } from './hello.service';
-import { Controller, Get, Post, Body, Header, Param } from '@nestjs/common';
+import { Controller, Get, Header, Param } from '@nestjs/common';
 import { Observable, of } from 'rxjs';
+import { HelloService } from './hello.service';
 import { UserByIdPipe } from './users/user-by-id.pipe';
 
 @Controller('hello')
@@ -15,7 +15,7 @@ export class HelloController {
 
   @Get('async')
   async asyncGreeting(): Promise<string> {
-    return await this.helloService.greeting();
+    return this.helloService.greeting();
   }
 
   @Get('stream')

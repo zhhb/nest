@@ -1,15 +1,17 @@
-import * as sinon from 'sinon';
 import { expect } from 'chai';
+import * as sinon from 'sinon';
+import { ApplicationConfig } from '../../application-config';
 import { GuardsContextCreator } from '../../guards/guards-context-creator';
-import { Observable } from 'rxjs';
+import { InstanceWrapper } from '../../injector/instance-wrapper';
 
 class Guard {}
 
 describe('GuardsContextCreator', () => {
   let guardsContextCreator: GuardsContextCreator;
+  let applicationConfig: ApplicationConfig;
   let guards: any[];
-  let container;
-  let getSpy;
+  let container: any;
+  let getSpy: sinon.SinonSpy;
 
   beforeEach(() => {
     guards = [
@@ -18,25 +20,34 @@ describe('GuardsContextCreator', () => {
         instance: {
           canActivate: () => true,
         },
+        getInstanceByContextId: () => guards[0],
       },
       {
         name: 'test2',
         instance: {
           canActivate: () => true,
         },
+        getInstanceByContextId: () => guards[1],
       },
       {},
       undefined,
     ];
     getSpy = sinon.stub().returns({
-      injectables: new Map([['test', guards[0]], ['test2', guards[1]]]),
+      injectables: new Map([
+        ['test', guards[0]],
+        ['test2', guards[1]],
+      ]),
     });
     container = {
       getModules: () => ({
         get: getSpy,
       }),
     };
-    guardsContextCreator = new GuardsContextCreator(container as any);
+    applicationConfig = new ApplicationConfig();
+    guardsContextCreator = new GuardsContextCreator(
+      container,
+      applicationConfig,
+    );
   });
   describe('createConcreteContext', () => {
     describe('when `moduleContext` is nil', () => {
@@ -69,10 +80,13 @@ describe('GuardsContextCreator', () => {
     });
     describe('when param is a constructor', () => {
       it('should pick instance from container', () => {
-        const wrapper = { instance: 'test' };
+        const wrapper = {
+          instance: 'test',
+          getInstanceByContextId: () => wrapper,
+        };
         sinon
           .stub(guardsContextCreator, 'getInstanceByMetatype')
-          .callsFake(() => wrapper);
+          .callsFake(() => wrapper as any);
         expect(guardsContextCreator.getGuardInstance(Guard)).to.be.eql(
           wrapper.instance,
         );
@@ -104,6 +118,40 @@ describe('GuardsContextCreator', () => {
           expect(guardsContextCreator.getInstanceByMetatype({})).to.be
             .undefined;
         });
+      });
+    });
+  });
+
+  describe('getGlobalMetadata', () => {
+    describe('when contextId is static and inquirerId is nil', () => {
+      it('should return global guards', () => {
+        const expectedResult = applicationConfig.getGlobalGuards();
+        expect(guardsContextCreator.getGlobalMetadata()).to.be.equal(
+          expectedResult,
+        );
+      });
+    });
+    describe('otherwise', () => {
+      it('should merge static global with request/transient scoped guards', () => {
+        const globalGuards: any = ['test'];
+        const instanceWrapper = new InstanceWrapper();
+        const instance = 'request-scoped';
+        const scopedGuardWrappers = [instanceWrapper];
+
+        sinon
+          .stub(applicationConfig, 'getGlobalGuards')
+          .callsFake(() => globalGuards);
+        sinon
+          .stub(applicationConfig, 'getGlobalRequestGuards')
+          .callsFake(() => scopedGuardWrappers);
+        sinon
+          .stub(instanceWrapper, 'getInstanceByContextId')
+          .callsFake(() => ({ instance } as any));
+
+        expect(guardsContextCreator.getGlobalMetadata({ id: 3 })).to.contains(
+          instance,
+          ...globalGuards,
+        );
       });
     });
   });

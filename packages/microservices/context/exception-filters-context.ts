@@ -1,21 +1,13 @@
-import 'reflect-metadata';
-import iterate from 'iterare';
+import { EXCEPTION_FILTERS_METADATA } from '@nestjs/common/constants';
 import { Controller } from '@nestjs/common/interfaces/controllers/controller.interface';
+import { isEmpty } from '@nestjs/common/utils/shared.utils';
+import { ApplicationConfig } from '@nestjs/core/application-config';
+import { BaseExceptionFilterContext } from '@nestjs/core/exceptions/base-exception-filter-context';
+import { STATIC_CONTEXT } from '@nestjs/core/injector/constants';
+import { NestContainer } from '@nestjs/core/injector/container';
+import { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper';
 import { Observable } from 'rxjs';
 import { RpcExceptionsHandler } from '../exceptions/rpc-exceptions-handler';
-import {
-  EXCEPTION_FILTERS_METADATA,
-  FILTER_CATCH_EXCEPTIONS,
-} from '@nestjs/common/constants';
-import {
-  isEmpty,
-  isUndefined,
-  isFunction,
-} from '@nestjs/common/utils/shared.utils';
-import { RpcExceptionFilter } from '@nestjs/common/interfaces/exceptions';
-import { BaseExceptionFilterContext } from '@nestjs/core/exceptions/base-exception-filter-context';
-import { ApplicationConfig } from '@nestjs/core/application-config';
-import { NestContainer } from '@nestjs/core/injector/container';
 
 export class ExceptionFiltersContext extends BaseExceptionFilterContext {
   constructor(
@@ -27,8 +19,10 @@ export class ExceptionFiltersContext extends BaseExceptionFilterContext {
 
   public create(
     instance: Controller,
-    callback: (data) => Observable<any>,
+    callback: <T = any>(data: T) => Observable<any>,
     module: string,
+    contextId = STATIC_CONTEXT,
+    inquirerId?: string,
   ): RpcExceptionsHandler {
     this.moduleContext = module;
 
@@ -37,15 +31,30 @@ export class ExceptionFiltersContext extends BaseExceptionFilterContext {
       instance,
       callback,
       EXCEPTION_FILTERS_METADATA,
+      contextId,
+      inquirerId,
     );
     if (isEmpty(filters)) {
       return exceptionHandler;
     }
-    exceptionHandler.setCustomFilters(filters);
+    exceptionHandler.setCustomFilters(filters.reverse());
     return exceptionHandler;
   }
 
-  public getGlobalMetadata<T extends any[]>(): T {
-    return this.config.getGlobalFilters() as T;
+  public getGlobalMetadata<T extends any[]>(
+    contextId = STATIC_CONTEXT,
+    inquirerId?: string,
+  ): T {
+    const globalFilters = this.config.getGlobalFilters() as T;
+    if (contextId === STATIC_CONTEXT && !inquirerId) {
+      return globalFilters;
+    }
+    const scopedFilterWrappers = this.config.getGlobalRequestFilters() as InstanceWrapper[];
+    const scopedFilters = scopedFilterWrappers
+      .map(wrapper => wrapper.getInstanceByContextId(contextId, inquirerId))
+      .filter(host => host)
+      .map(host => host.instance);
+
+    return globalFilters.concat(scopedFilters) as T;
   }
 }

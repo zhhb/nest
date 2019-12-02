@@ -1,24 +1,21 @@
-import { Server } from './server';
-import { NO_PATTERN_MESSAGE } from '../constants';
+import { isUndefined } from '@nestjs/common/utils/shared.utils';
+import { Observable } from 'rxjs';
 import {
-  MicroserviceOptions,
-  RedisOptions,
-} from '../interfaces/microservice-configuration.interface';
-import { CustomTransportStrategy, PacketId } from './../interfaces';
-import { Observable, EMPTY as empty } from 'rxjs';
-import { catchError, finalize } from 'rxjs/operators';
-import {
-  REDIS_DEFAULT_URL,
   CONNECT_EVENT,
-  MESSAGE_EVENT,
   ERROR_EVENT,
-} from './../constants';
-import { ReadPacket } from '@nestjs/microservices';
+  MESSAGE_EVENT,
+  NO_MESSAGE_HANDLER,
+  REDIS_DEFAULT_URL,
+} from '../constants';
+import { RedisContext } from '../ctx-host';
 import {
-  RedisClient,
   ClientOpts,
+  RedisClient,
   RetryStrategyOptions,
 } from '../external/redis.interface';
+import { CustomTransportStrategy, IncomingRequest } from '../interfaces';
+import { RedisOptions } from '../interfaces/microservice-configuration.interface';
+import { Server } from './server';
 
 let redisPackage: any = {};
 
@@ -28,13 +25,16 @@ export class ServerRedis extends Server implements CustomTransportStrategy {
   private pubClient: RedisClient;
   private isExplicitlyTerminated = false;
 
-  constructor(private readonly options: MicroserviceOptions) {
+  constructor(private readonly options: RedisOptions['options']) {
     super();
-    this.url =
-      this.getOptionsProp<RedisOptions>(this.options, 'url') ||
-      REDIS_DEFAULT_URL;
+    this.url = this.getOptionsProp(this.options, 'url') || REDIS_DEFAULT_URL;
 
-    redisPackage = this.loadPackage('redis', ServerRedis.name);
+    redisPackage = this.loadPackage('redis', ServerRedis.name, () =>
+      require('redis'),
+    );
+
+    this.initializeSerializer(options);
+    this.initializeDeserializer(options);
   }
 
   public listen(callback: () => void) {
@@ -53,10 +53,13 @@ export class ServerRedis extends Server implements CustomTransportStrategy {
 
   public bindEvents(subClient: RedisClient, pubClient: RedisClient) {
     subClient.on(MESSAGE_EVENT, this.getMessageHandler(pubClient).bind(this));
-    const subscribePatterns = Object.keys(this.messageHandlers);
-    subscribePatterns.forEach(pattern =>
-      subClient.subscribe(this.getAckQueueName(pattern)),
-    );
+    const subscribePatterns = [...this.messageHandlers.keys()];
+    subscribePatterns.forEach(pattern => {
+      const { isEventHandler } = this.messageHandlers.get(pattern);
+      subClient.subscribe(
+        isEventHandler ? pattern : this.getAckQueueName(pattern),
+      );
+    });
   }
 
   public close() {
@@ -73,35 +76,58 @@ export class ServerRedis extends Server implements CustomTransportStrategy {
   }
 
   public getMessageHandler(pub: RedisClient) {
-    return async (channel, buffer) =>
-      await this.handleMessage(channel, buffer, pub);
+    return async (channel: string, buffer: string | any) =>
+      this.handleMessage(channel, buffer, pub);
   }
 
-  public async handleMessage(channel, buffer: string | any, pub: RedisClient) {
-    const packet = this.deserialize(buffer);
-    const pattern = channel.replace(/_ack$/, '');
-    const publish = this.getPublisher(pub, pattern, packet.id);
-    const status = 'error';
+  public async handleMessage(
+    channel: string,
+    buffer: string | any,
+    pub: RedisClient,
+  ) {
+    const rawMessage = this.parseMessage(buffer);
+    const packet = this.deserializer.deserialize(rawMessage, { channel });
+    const redisCtx = new RedisContext([channel]);
 
-    if (!this.messageHandlers[pattern]) {
-      return publish({ id: packet.id, status, err: NO_PATTERN_MESSAGE });
+    if (isUndefined((packet as IncomingRequest).id)) {
+      return this.handleEvent(channel, packet, redisCtx);
     }
-    const handler = this.messageHandlers[pattern];
+    const pattern = channel.replace(/_ack$/, '');
+    const publish = this.getPublisher(
+      pub,
+      pattern,
+      (packet as IncomingRequest).id,
+    );
+    const handler = this.getHandlerByPattern(pattern);
+
+    if (!handler) {
+      const status = 'error';
+      const noHandlerPacket = {
+        id: (packet as IncomingRequest).id,
+        status,
+        err: NO_MESSAGE_HANDLER,
+      };
+      return publish(noHandlerPacket);
+    }
     const response$ = this.transformToObservable(
-      await handler(packet.data),
+      await handler(packet.data, redisCtx),
     ) as Observable<any>;
     response$ && this.send(response$, publish);
   }
 
   public getPublisher(pub: RedisClient, pattern: any, id: string) {
-    return response =>
-      pub.publish(
+    return (response: any) => {
+      Object.assign(response, { id });
+      const outgoingResponse = this.serializer.serialize(response);
+
+      return pub.publish(
         this.getResQueueName(pattern),
-        JSON.stringify(Object.assign(response, { id })),
+        JSON.stringify(outgoingResponse),
       );
+    };
   }
 
-  public deserialize(content): ReadPacket & PacketId {
+  public parseMessage(content: any): Record<string, any> {
     try {
       return JSON.parse(content);
     } catch (e) {
@@ -117,12 +143,13 @@ export class ServerRedis extends Server implements CustomTransportStrategy {
     return `${pattern}_res`;
   }
 
-  public handleError(stream) {
-    stream.on(ERROR_EVENT, err => this.logger.error(err));
+  public handleError(stream: any) {
+    stream.on(ERROR_EVENT, (err: any) => this.logger.error(err));
   }
 
   public getClientOptions(): Partial<ClientOpts> {
-    const retry_strategy = options => this.createRetryStrategy(options);
+    const retry_strategy = (options: RetryStrategyOptions) =>
+      this.createRetryStrategy(options);
     return {
       retry_strategy,
     };
@@ -132,15 +159,17 @@ export class ServerRedis extends Server implements CustomTransportStrategy {
     options: RetryStrategyOptions,
   ): undefined | number | void {
     if (options.error && (options.error as any).code === 'ECONNREFUSED') {
-      return this.logger.error(`Error ECONNREFUSED: ${this.url}`);
+      this.logger.error(`Error ECONNREFUSED: ${this.url}`);
+    }
+    if (this.isExplicitlyTerminated) {
+      return undefined;
     }
     if (
-      this.isExplicitlyTerminated ||
-      !this.getOptionsProp<RedisOptions>(this.options, 'retryAttempts') ||
-      options.attempt >
-        this.getOptionsProp<RedisOptions>(this.options, 'retryAttempts')
+      !this.getOptionsProp(this.options, 'retryAttempts') ||
+      options.attempt > this.getOptionsProp(this.options, 'retryAttempts')
     ) {
-      return undefined;
+      this.logger.error(`Retry time exhausted: ${this.url}`);
+      throw new Error('Retry time exhausted');
     }
     return this.getOptionsProp(this.options, 'retryDelay') || 0;
   }

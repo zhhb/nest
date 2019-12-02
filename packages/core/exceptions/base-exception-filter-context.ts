@@ -1,23 +1,12 @@
-import 'reflect-metadata';
-import iterate from 'iterare';
-import { Controller } from '@nestjs/common/interfaces/controllers/controller.interface';
-import { ExceptionsHandler } from '../exceptions/exceptions-handler';
-import {
-  EXCEPTION_FILTERS_METADATA,
-  FILTER_CATCH_EXCEPTIONS,
-} from '@nestjs/common/constants';
-import {
-  isEmpty,
-  isFunction,
-  isUndefined,
-} from '@nestjs/common/utils/shared.utils';
-import { Type } from '@nestjs/common/interfaces/index';
-import { ExceptionFilterMetadata } from '@nestjs/common/interfaces/exceptions/exception-filter-metadata.interface';
+import { FILTER_CATCH_EXCEPTIONS } from '@nestjs/common/constants';
+import { Type } from '@nestjs/common/interfaces';
 import { ExceptionFilter } from '@nestjs/common/interfaces/exceptions/exception-filter.interface';
-import { RouterProxyCallback } from './../router/router-proxy';
-import { ContextCreator } from './../helpers/context-creator';
-import { ApplicationConfig } from './../application-config';
+import { isEmpty, isFunction } from '@nestjs/common/utils/shared.utils';
+import iterate from 'iterare';
+import { ContextCreator } from '../helpers/context-creator';
+import { STATIC_CONTEXT } from '../injector/constants';
 import { NestContainer } from '../injector/container';
+import { InstanceWrapper } from '../injector/instance-wrapper';
 
 export class BaseExceptionFilterContext extends ContextCreator {
   protected moduleContext: string;
@@ -28,15 +17,18 @@ export class BaseExceptionFilterContext extends ContextCreator {
 
   public createConcreteContext<T extends any[], R extends any[]>(
     metadata: T,
+    contextId = STATIC_CONTEXT,
+    inquirerId?: string,
   ): R {
-    if (isUndefined(metadata) || isEmpty(metadata)) {
+    if (isEmpty(metadata)) {
       return [] as R;
     }
     return iterate(metadata)
       .filter(
         instance => instance && (isFunction(instance.catch) || instance.name),
       )
-      .map(filter => this.getFilterInstance(filter))
+      .map(filter => this.getFilterInstance(filter, contextId, inquirerId))
+      .filter(item => !!item)
       .map(instance => ({
         func: instance.catch.bind(instance),
         exceptionMetatypes: this.reflectCatchExceptions(instance),
@@ -44,18 +36,29 @@ export class BaseExceptionFilterContext extends ContextCreator {
       .toArray() as R;
   }
 
-  public getFilterInstance(filter: Function | ExceptionFilter) {
-    const isObject = !!(filter as ExceptionFilter).catch;
+  public getFilterInstance(
+    filter: Function | ExceptionFilter,
+    contextId = STATIC_CONTEXT,
+    inquirerId?: string,
+  ): ExceptionFilter | null {
+    const isObject = (filter as ExceptionFilter).catch;
     if (isObject) {
-      return filter;
+      return filter as ExceptionFilter;
     }
     const instanceWrapper = this.getInstanceByMetatype(filter);
-    return instanceWrapper && instanceWrapper.instance
-      ? instanceWrapper.instance
-      : null;
+    if (!instanceWrapper) {
+      return null;
+    }
+    const instanceHost = instanceWrapper.getInstanceByContextId(
+      contextId,
+      inquirerId,
+    );
+    return instanceHost && instanceHost.instance;
   }
 
-  public getInstanceByMetatype(filter): { instance: any } | undefined {
+  public getInstanceByMetatype<T extends Record<string, any>>(
+    filter: T,
+  ): InstanceWrapper | undefined {
     if (!this.moduleContext) {
       return undefined;
     }
@@ -64,7 +67,7 @@ export class BaseExceptionFilterContext extends ContextCreator {
     if (!module) {
       return undefined;
     }
-    return module.injectables.get((filter as any).name);
+    return module.injectables.get(filter.name);
   }
 
   public reflectCatchExceptions(instance: ExceptionFilter): Type<any>[] {

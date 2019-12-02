@@ -1,6 +1,5 @@
-import 'reflect-metadata';
 import { expect } from 'chai';
-import { WebSocketServer } from '../../utils/gateway-server.decorator';
+import { WebSocketServer } from '../../decorators/gateway-server.decorator';
 import { GATEWAY_SERVER_METADATA } from '../../constants';
 
 describe('@WebSocketServer', () => {

@@ -1,38 +1,59 @@
-import 'reflect-metadata';
-import { Controller } from '@nestjs/common/interfaces/controllers/controller.interface';
+import { HttpServer } from '@nestjs/common';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { RequestMethod } from '@nestjs/common/enums/request-method.enum';
-import { RouterProxy, RouterProxyCallback } from './router-proxy';
-import { UnknownRequestMappingException } from '../errors/exceptions/unknown-request-mapping.exception';
+import { Controller } from '@nestjs/common/interfaces/controllers/controller.interface';
 import { Type } from '@nestjs/common/interfaces/type.interface';
-import { isUndefined, validatePath } from '@nestjs/common/utils/shared.utils';
-import { RouterMethodFactory } from '../helpers/router-method-factory';
-import { PATH_METADATA, METHOD_METADATA } from '@nestjs/common/constants';
 import { Logger } from '@nestjs/common/services/logger.service';
-import { routeMappedMessage } from '../helpers/messages';
-import { RouterExecutionContext } from './router-execution-context';
-import { ExceptionsFilter } from './interfaces/exceptions-filter.interface';
-import { RouteParamsFactory } from './route-params-factory';
-import { MetadataScanner } from '../metadata-scanner';
-import { ApplicationConfig } from './../application-config';
-import { PipesContextCreator } from './../pipes/pipes-context-creator';
-import { PipesConsumer } from './../pipes/pipes-consumer';
-import { NestContainer } from '../injector/container';
-import { GuardsContextCreator } from '../guards/guards-context-creator';
+import {
+  isString,
+  isUndefined,
+  validatePath,
+} from '@nestjs/common/utils/shared.utils';
+import { ApplicationConfig } from '../application-config';
+import { UnknownRequestMappingException } from '../errors/exceptions/unknown-request-mapping.exception';
 import { GuardsConsumer } from '../guards/guards-consumer';
-import { InterceptorsContextCreator } from '../interceptors/interceptors-context-creator';
+import { GuardsContextCreator } from '../guards/guards-context-creator';
+import { createContextId } from '../helpers/context-id-factory';
+import { ExecutionContextHost } from '../helpers/execution-context-host';
+import { ROUTE_MAPPED_MESSAGE } from '../helpers/messages';
+import { RouterMethodFactory } from '../helpers/router-method-factory';
+import { STATIC_CONTEXT } from '../injector/constants';
+import { NestContainer } from '../injector/container';
+import { Injector } from '../injector/injector';
+import { ContextId, InstanceWrapper } from '../injector/instance-wrapper';
+import { Module } from '../injector/module';
 import { InterceptorsConsumer } from '../interceptors/interceptors-consumer';
+import { InterceptorsContextCreator } from '../interceptors/interceptors-context-creator';
+import { MetadataScanner } from '../metadata-scanner';
+import { PipesConsumer } from '../pipes/pipes-consumer';
+import { PipesContextCreator } from '../pipes/pipes-context-creator';
+import { ExceptionsFilter } from './interfaces/exceptions-filter.interface';
+import { REQUEST } from './request';
+import { REQUEST_CONTEXT_ID } from './request/request-constants';
+import { RouteParamsFactory } from './route-params-factory';
+import { RouterExecutionContext } from './router-execution-context';
+import { RouterProxy, RouterProxyCallback } from './router-proxy';
+
+export interface RoutePathProperties {
+  path: string[];
+  requestMethod: RequestMethod;
+  targetCallback: RouterProxyCallback;
+  methodName: string;
+}
 
 export class RouterExplorer {
   private readonly executionContextCreator: RouterExecutionContext;
   private readonly routerMethodFactory = new RouterMethodFactory();
   private readonly logger = new Logger(RouterExplorer.name, true);
+  private readonly exceptionFiltersCache = new WeakMap();
 
   constructor(
     private readonly metadataScanner: MetadataScanner,
-    container: NestContainer,
+    private readonly container: NestContainer,
+    private readonly injector?: Injector,
     private readonly routerProxy?: RouterProxy,
     private readonly exceptionsFilter?: ExceptionsFilter,
-    private readonly config?: ApplicationConfig,
+    config?: ApplicationConfig,
   ) {
     this.executionContextCreator = new RouterExecutionContext(
       new RouteParamsFactory(),
@@ -42,22 +63,22 @@ export class RouterExplorer {
       new GuardsConsumer(),
       new InterceptorsContextCreator(container, config),
       new InterceptorsConsumer(),
-      container.getApplicationRef(),
+      container.getHttpAdapterRef(),
     );
   }
 
-  public explore(
-    instance: Controller,
-    metatype: Type<Controller>,
+  public explore<T extends HttpServer = any>(
+    instanceWrapper: InstanceWrapper,
     module: string,
-    appInstance,
+    applicationRef: T,
     basePath: string,
   ) {
+    const { instance } = instanceWrapper;
     const routerPaths = this.scanForPaths(instance);
     this.applyPathsToRouterProxy(
-      appInstance,
+      applicationRef,
       routerPaths,
-      instance,
+      instanceWrapper,
       module,
       basePath,
     );
@@ -79,7 +100,10 @@ export class RouterExplorer {
     return validatePath(path);
   }
 
-  public scanForPaths(instance: Controller, prototype?): RoutePathProperties[] {
+  public scanForPaths(
+    instance: Controller,
+    prototype?: any,
+  ): RoutePathProperties[] {
     const instancePrototype = isUndefined(prototype)
       ? Object.getPrototypeOf(instance)
       : prototype;
@@ -93,7 +117,7 @@ export class RouterExplorer {
 
   public exploreMethodMetadata(
     instance: Controller,
-    instancePrototype,
+    instancePrototype: any,
     methodName: string,
   ): RoutePathProperties {
     const targetCallback = instancePrototype[methodName];
@@ -105,57 +129,89 @@ export class RouterExplorer {
       METHOD_METADATA,
       targetCallback,
     );
+    const path = isString(routePath)
+      ? [this.validateRoutePath(routePath)]
+      : routePath.map(p => this.validateRoutePath(p));
     return {
-      path: this.validateRoutePath(routePath),
+      path,
       requestMethod,
       targetCallback,
       methodName,
     };
   }
 
-  public applyPathsToRouterProxy(
-    router,
+  public applyPathsToRouterProxy<T extends HttpServer>(
+    router: T,
     routePaths: RoutePathProperties[],
-    instance: Controller,
+    instanceWrapper: InstanceWrapper,
     module: string,
     basePath: string,
   ) {
-    (routePaths || []).map(pathProperties => {
+    (routePaths || []).forEach(pathProperties => {
       const { path, requestMethod } = pathProperties;
       this.applyCallbackToRouter(
         router,
         pathProperties,
-        instance,
+        instanceWrapper,
         module,
         basePath,
       );
-      this.logger.log(routeMappedMessage(path, requestMethod));
+      path.forEach(p =>
+        this.logger.log(ROUTE_MAPPED_MESSAGE(p, requestMethod)),
+      );
     });
   }
 
-  private applyCallbackToRouter(
-    router,
+  private applyCallbackToRouter<T extends HttpServer>(
+    router: T,
     pathProperties: RoutePathProperties,
-    instance: Controller,
-    module: string,
+    instanceWrapper: InstanceWrapper,
+    moduleKey: string,
     basePath: string,
   ) {
-    const { path, requestMethod, targetCallback, methodName } = pathProperties;
+    const {
+      path: paths,
+      requestMethod,
+      targetCallback,
+      methodName,
+    } = pathProperties;
+    const { instance } = instanceWrapper;
     const routerMethod = this.routerMethodFactory
       .get(router, requestMethod)
       .bind(router);
 
+    const stripSlash = (str: string) =>
+      str[str.length - 1] === '/' ? str.slice(0, str.length - 1) : str;
+
+    const isRequestScoped = !instanceWrapper.isDependencyTreeStatic();
+    const module = this.container.getModuleByKey(moduleKey);
+
+    if (isRequestScoped) {
+      const handler = this.createRequestScopedHandler(
+        instanceWrapper,
+        requestMethod,
+        module,
+        moduleKey,
+        methodName,
+      );
+
+      paths.forEach(path => {
+        const fullPath = stripSlash(basePath) + path;
+        routerMethod(stripSlash(fullPath) || '/', handler);
+      });
+      return;
+    }
     const proxy = this.createCallbackProxy(
       instance,
       targetCallback,
       methodName,
-      module,
+      moduleKey,
       requestMethod,
     );
-    const stripSlash = str =>
-      str[str.length - 1] === '/' ? str.slice(0, str.length - 1) : str;
-    const fullPath = stripSlash(basePath) + path;
-    routerMethod(stripSlash(fullPath) || '/', proxy);
+    paths.forEach(path => {
+      const fullPath = stripSlash(basePath) + path;
+      routerMethod(stripSlash(fullPath) || '/', proxy);
+    });
   }
 
   private createCallbackProxy(
@@ -163,7 +219,9 @@ export class RouterExplorer {
     callback: RouterProxyCallback,
     methodName: string,
     module: string,
-    requestMethod,
+    requestMethod: RequestMethod,
+    contextId = STATIC_CONTEXT,
+    inquirerId?: string,
   ) {
     const executionContext = this.executionContextCreator.create(
       instance,
@@ -171,19 +229,89 @@ export class RouterExplorer {
       methodName,
       module,
       requestMethod,
+      contextId,
+      inquirerId,
     );
     const exceptionFilter = this.exceptionsFilter.create(
       instance,
       callback,
       module,
+      contextId,
+      inquirerId,
     );
     return this.routerProxy.createProxy(executionContext, exceptionFilter);
   }
-}
 
-export interface RoutePathProperties {
-  path: string;
-  requestMethod: RequestMethod;
-  targetCallback: RouterProxyCallback;
-  methodName: string;
+  public createRequestScopedHandler(
+    instanceWrapper: InstanceWrapper,
+    requestMethod: RequestMethod,
+    module: Module,
+    moduleKey: string,
+    methodName: string,
+  ) {
+    const { instance } = instanceWrapper;
+    const collection = module.controllers;
+    return async <TRequest, TResponse>(
+      req: TRequest,
+      res: TResponse,
+      next: () => void,
+    ) => {
+      try {
+        const contextId = this.getContextId(req);
+        this.registerRequestProvider(req, contextId);
+
+        const contextInstance = await this.injector.loadPerContext(
+          instance,
+          module,
+          collection,
+          contextId,
+        );
+        await this.createCallbackProxy(
+          contextInstance,
+          contextInstance[methodName],
+          methodName,
+          moduleKey,
+          requestMethod,
+          contextId,
+          instanceWrapper.id,
+        )(req, res, next);
+      } catch (err) {
+        let exceptionFilter = this.exceptionFiltersCache.get(
+          instance[methodName],
+        );
+        if (!exceptionFilter) {
+          exceptionFilter = this.exceptionsFilter.create(
+            instance,
+            instance[methodName],
+            moduleKey,
+          );
+          this.exceptionFiltersCache.set(instance[methodName], exceptionFilter);
+        }
+        const host = new ExecutionContextHost([req, res, next]);
+        exceptionFilter.next(err, host);
+      }
+    };
+  }
+
+  private registerRequestProvider<T = any>(request: T, contextId: ContextId) {
+    const coreModuleRef = this.container.getInternalCoreModuleRef();
+    const wrapper = coreModuleRef.getProviderByKey(REQUEST);
+
+    wrapper.setInstanceByContextId(contextId, {
+      instance: request,
+      isResolved: true,
+    });
+  }
+
+  private getContextId<T extends Record<any, any> = any>(
+    request: T,
+  ): ContextId {
+    if (request[REQUEST_CONTEXT_ID as any]) {
+      return request[REQUEST_CONTEXT_ID as any];
+    }
+    if (request.raw && request.raw[REQUEST_CONTEXT_ID]) {
+      return request.raw[REQUEST_CONTEXT_ID];
+    }
+    return createContextId();
+  }
 }

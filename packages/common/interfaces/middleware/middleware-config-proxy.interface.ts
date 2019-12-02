@@ -1,22 +1,23 @@
-import { MiddlewareConsumer } from './middleware-consumer.interface';
-import { RequestMappingMetadata } from '../request-mapping-metadata.interface';
 import { Type } from '../type.interface';
+import { RouteInfo } from './middleware-configuration.interface';
+import { MiddlewareConsumer } from './middleware-consumer.interface';
 
 export interface MiddlewareConfigProxy {
   /**
-   * Passes custom arguments to `resolve()` method of the middleware.
+   * Excludes routes from the currently processed middleware.
+   * This excluded route has to use an exact same route path.
    *
-   * @param  {} ...data
+   * @param  {} ...routes
    * @returns {MiddlewareConfigProxy}
    */
-  with(...data: any[]): MiddlewareConfigProxy;
+  exclude(...routes: (string | RouteInfo)[]): MiddlewareConfigProxy;
 
   /**
-   * Attaches passed either routes (strings) or controllers to the processed middleware(s).
-   * When you pass Controller class Nest will attach middleware to every path defined within this controller.
+   * Attaches passed either routes or controllers to the currently configured middleware.
+   * If you pass a class, Nest would attach middleware to every path defined within this controller.
    *
    * @param  {} ...routes
    * @returns {MiddlewareConsumer}
    */
-  forRoutes(...routes: (string | Type<any>)[]): MiddlewareConsumer;
+  forRoutes(...routes: (string | Type<any> | RouteInfo)[]): MiddlewareConsumer;
 }

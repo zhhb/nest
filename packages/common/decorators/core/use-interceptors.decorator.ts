@@ -1,26 +1,40 @@
 import { INTERCEPTORS_METADATA } from '../../constants';
+import { NestInterceptor } from '../../interfaces';
 import { extendArrayMetadata } from '../../utils/extend-metadata.util';
 import { isFunction } from '../../utils/shared.utils';
 import { validateEach } from '../../utils/validate-each.util';
-import { NestInterceptor } from '../../interfaces';
 
 /**
- * Binds interceptors to the particular context.
- * When the `@UseInterceptors()` is used on the controller level:
- * - Interceptor will be register to each handler (every method)
+ * Decorator that binds interceptors to the scope of the controller or method,
+ * depending on its context.
  *
- * When the `@UseInterceptors()` is used on the handle level:
- * - Interceptor will be registered only to specified method
+ * When `@UseInterceptors` is used at the controller level, the interceptor will
+ * be applied to every handler (method) in the controller.
  *
- * @param  {} ...interceptors
+ * When `@UseInterceptors` is used at the individual handler level, the interceptor
+ * will apply only to that specific method.
+ *
+ * @param interceptors a single interceptor instance or class, or a list of
+ * interceptor instances or classes.
+ *
+ * @see [Interceptors](https://docs.nestjs.com/interceptors)
+ *
+ * @usageNotes
+ * Interceptors can also be set up globally for all controllers and routes
+ * using `app.useGlobalInterceptors()`.  [See here for details](https://docs.nestjs.com/interceptors#binding-interceptors)
+ *
+ * @publicApi
  */
 export function UseInterceptors(
-  ...interceptors: (NestInterceptor | Function)[],
+  ...interceptors: (NestInterceptor | Function)[]
 ) {
-  return (target: any, key?, descriptor?) => {
-    const isValidInterceptor = interceptor =>
+  return (target: any, key?: string, descriptor?: any) => {
+    const isValidInterceptor = <T extends Function | Record<string, any>>(
+      interceptor: T,
+    ) =>
       interceptor &&
-      (isFunction(interceptor) || isFunction(interceptor.intercept));
+      (isFunction(interceptor) ||
+        isFunction((interceptor as Record<string, any>).intercept));
 
     if (descriptor) {
       validateEach(

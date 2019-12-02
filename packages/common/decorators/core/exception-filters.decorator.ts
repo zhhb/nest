@@ -1,15 +1,16 @@
-import 'reflect-metadata';
 import { EXCEPTION_FILTERS_METADATA } from '../../constants';
-import { Logger } from '@nestjs/common';
 import { ExceptionFilter } from '../../index';
 import { extendArrayMetadata } from '../../utils/extend-metadata.util';
 import { isFunction } from '../../utils/shared.utils';
 import { validateEach } from '../../utils/validate-each.util';
 
 const defineFiltersMetadata = (...filters: (Function | ExceptionFilter)[]) => {
-  return (target: any, key?, descriptor?) => {
-    const isFilterValid = filter =>
-      filter && (isFunction(filter) || isFunction(filter.catch));
+  return (target: any, key?: string, descriptor?: any) => {
+    const isFilterValid = <T extends Function | Record<string, any>>(
+      filter: T,
+    ) =>
+      filter &&
+      (isFunction(filter) || isFunction((filter as Record<string, any>).catch));
 
     if (descriptor) {
       validateEach(
@@ -33,14 +34,26 @@ const defineFiltersMetadata = (...filters: (Function | ExceptionFilter)[]) => {
 };
 
 /**
- * Setups exception filters to the chosen context.
- * When the `@UseFilters()` is used on the controller level:
- * - Exception Filter will be set up to every handler (every method)
+ * Decorator that binds exception filters to the scope of the controller or
+ * method, depending on its context.
  *
- * When the `@UseFilters()` is used on the handle level:
- * - Exception Filter will be set up only to specified method
+ * When `@UseFilters` is used at the controller level, the filter will be
+ * applied to every handler (method) in the controller.
  *
- * @param  {ExceptionFilter[]} ...filters
+ * When `@UseFilters` is used at the individual handler level, the filter
+ * will apply only to that specific method.
+ *
+ * @param filters exception filter instance or class, or a list of exception
+ * filter instances or classes.
+ *
+ * @see [Exception filters](https://docs.nestjs.com/exception-filters)
+ *
+ * @usageNotes
+ * Exception filters can also be set up globally for all controllers and routes
+ * using `app.useGlobalFilters()`.  [See here for details](https://docs.nestjs.com/exception-filters#binding-filters)
+ *
+ * @publicApi
  */
+
 export const UseFilters = (...filters: (ExceptionFilter | Function)[]) =>
   defineFiltersMetadata(...filters);

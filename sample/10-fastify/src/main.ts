@@ -1,9 +1,16 @@
-import { NestFactory, FastifyAdapter } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
-import { ApplicationModule } from './app.module';
+import { NestFactory } from '@nestjs/core';
+import {
+  FastifyAdapter,
+  NestFastifyApplication,
+} from '@nestjs/platform-fastify';
+import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(ApplicationModule, new FastifyAdapter());
+  const app = await NestFactory.create<NestFastifyApplication>(
+    AppModule,
+    new FastifyAdapter(),
+  );
   app.useGlobalPipes(new ValidationPipe());
   await app.listen(3000);
 }

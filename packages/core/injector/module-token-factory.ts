@@ -1,31 +1,34 @@
-import { Type } from '@nestjs/common/interfaces/type.interface';
-import { SHARED_MODULE_METADATA } from '@nestjs/common/constants';
 import { DynamicModule } from '@nestjs/common';
+import { SHARED_MODULE_METADATA } from '@nestjs/common/constants';
+import { Type } from '@nestjs/common/interfaces/type.interface';
+import stringify from 'fast-safe-stringify';
+import * as hash from 'object-hash';
 
 export class ModuleTokenFactory {
   public create(
     metatype: Type<any>,
     scope: Type<any>[],
     dynamicModuleMetadata?: Partial<DynamicModule> | undefined,
-  ) {
-    const reflectedScope = this.reflectScope(metatype);
-    const isSingleScoped = reflectedScope === true;
+  ): string {
+    const moduleScope = this.reflectScope(metatype);
+    const isSingleScoped = moduleScope === true;
     const opaqueToken = {
       module: this.getModuleName(metatype),
       dynamic: this.getDynamicMetadataToken(dynamicModuleMetadata),
-      scope: isSingleScoped ? this.getScopeStack(scope) : reflectedScope,
+      scope: isSingleScoped ? this.getScopeStack(scope) : moduleScope,
     };
-    return JSON.stringify(opaqueToken);
+    return hash(opaqueToken, { ignoreUnknown: true });
   }
 
   public getDynamicMetadataToken(
     dynamicModuleMetadata: Partial<DynamicModule> | undefined,
   ): string {
-    return dynamicModuleMetadata ? JSON.stringify(dynamicModuleMetadata) : '';
-  }
-
-  public getModuleName(metatype: Type<any>): string {
-    return metatype.name;
+    // Uses safeStringify instead of JSON.stringify to support circular dynamic modules
+    // The replacer function is also required in order to obtain real class names
+    // instead of the unified "Function" key
+    return dynamicModuleMetadata
+      ? stringify(dynamicModuleMetadata, this.replacer)
+      : '';
   }
 
   public getScopeStack(scope: Type<any>[]): string[] {
@@ -42,11 +45,19 @@ export class ModuleTokenFactory {
     return stack.map(module => module.name);
   }
 
+  public getModuleName(metatype: Type<any>): string {
+    return metatype.name;
+  }
+
   private reflectScope(metatype: Type<any>) {
-    const scope = Reflect.getMetadata(
-      SHARED_MODULE_METADATA,
-      metatype,
-    );
+    const scope = Reflect.getMetadata(SHARED_MODULE_METADATA, metatype);
     return scope ? scope : 'global';
+  }
+
+  private replacer(key: string, value: any) {
+    if (typeof value === 'function') {
+      return value.name;
+    }
+    return value;
   }
 }

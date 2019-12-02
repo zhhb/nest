@@ -1,8 +1,10 @@
-import { SocketsContainer } from './container';
-import { ObservableSocket } from './observable-socket';
-import { ObservableSocketServer } from './interfaces/observable-socket-server.interface';
 import { validatePath } from '@nestjs/common/utils/shared.utils';
 import { ApplicationConfig } from '@nestjs/core/application-config';
+import { isString } from 'util';
+import { GatewayMetadata } from './interfaces/gateway-metadata.interface';
+import { SocketEventsHost } from './interfaces/socket-events-host.interface';
+import { SocketEventsHostFactory } from './socket-events-host-factory';
+import { SocketsContainer } from './sockets-container';
 
 export class SocketServerProvider {
   constructor(
@@ -10,58 +12,67 @@ export class SocketServerProvider {
     private readonly applicationConfig: ApplicationConfig,
   ) {}
 
-  public scanForSocketServer(
-    options: any,
+  public scanForSocketServer<T extends GatewayMetadata>(
+    options: T,
     port: number,
-  ): ObservableSocketServer {
-    const observableServer = this.socketsContainer.getServerByPort(port);
-    return observableServer
-      ? this.createWithNamespace(options, port, observableServer)
+  ): SocketEventsHost {
+    const socketEventsHost = this.socketsContainer.getSocketEventsHostByPort(
+      port,
+    );
+    return socketEventsHost
+      ? this.createWithNamespace(options, port, socketEventsHost)
       : this.createSocketServer(options, port);
   }
 
-  private createSocketServer(
-    options: any,
+  private createSocketServer<T extends GatewayMetadata>(
+    options: T,
     port: number,
-  ): ObservableSocketServer {
-    const { namespace, server, ...opt } = options;
+  ): SocketEventsHost {
+    const { namespace, server, ...partialOptions } = options as any;
     const adapter = this.applicationConfig.getIoAdapter();
-    const ioServer = adapter.create(port, opt);
-    const observableSocket = ObservableSocket.create(ioServer);
+    const ioServer = adapter.create(port, partialOptions);
+    const observableSocket = SocketEventsHostFactory.create(ioServer);
 
-    this.socketsContainer.addServer(null, port, observableSocket);
+    this.socketsContainer.addSocketEventsHost(null, port, observableSocket);
     return this.createWithNamespace(options, port, observableSocket);
   }
 
-  private createWithNamespace(
-    options: any,
+  private createWithNamespace<T extends GatewayMetadata>(
+    options: T,
     port: number,
-    observableSocket: ObservableSocketServer,
-  ): ObservableSocketServer {
+    socketEventsHost: SocketEventsHost,
+  ): SocketEventsHost {
     const { namespace } = options;
     if (!namespace) {
-      return observableSocket;
+      return socketEventsHost;
     }
     const namespaceServer = this.getServerOfNamespace(
       options,
       port,
-      observableSocket.server,
+      socketEventsHost.server,
     );
-    const observableNamespaceSocket = ObservableSocket.create(namespaceServer);
-    this.socketsContainer.addServer(namespace, port, observableNamespaceSocket);
-    return observableNamespaceSocket;
+    const eventsHost = SocketEventsHostFactory.create(namespaceServer);
+    this.socketsContainer.addSocketEventsHost(namespace, port, eventsHost);
+    return eventsHost;
   }
 
-  private getServerOfNamespace(options: any, port: number, server) {
+  private getServerOfNamespace<TOptions extends GatewayMetadata, TServer = any>(
+    options: TOptions,
+    port: number,
+    server: TServer,
+  ) {
     const adapter = this.applicationConfig.getIoAdapter();
     return adapter.create(port, {
-      ...options,
+      ...(options as any),
       namespace: this.validateNamespace(options.namespace || ''),
       server,
     });
   }
 
-  private validateNamespace(namespace: string): string {
+  private validateNamespace(namespace: string | RegExp): string | RegExp {
+    if (!isString(namespace)) {
+      return namespace;
+    }
     return validatePath(namespace);
   }
 }

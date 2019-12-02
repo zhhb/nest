@@ -1,18 +1,20 @@
-import * as sinon from 'sinon';
 import { expect } from 'chai';
-import { RouterProxy } from '../../router/router-proxy';
-import { ExceptionsHandler } from '../../exceptions/exceptions-handler';
+import * as sinon from 'sinon';
 import { HttpException } from '../../../common/exceptions/http.exception';
-import { ExpressAdapter } from '../../adapters/express-adapter';
+import { ExceptionsHandler } from '../../exceptions/exceptions-handler';
+import { RouterProxy } from '../../router/router-proxy';
+import { NoopHttpAdapter } from '../utils/noop-adapter.spec';
+import { SinonSpy } from 'sinon';
+import { ExecutionContextHost } from '../../helpers/execution-context-host';
 
 describe('RouterProxy', () => {
   let routerProxy: RouterProxy;
-  let handlerMock: sinon.SinonMock;
   let handler: ExceptionsHandler;
-
+  const httpException = new HttpException('test', 500);
+  let nextStub: sinon.SinonStub;
   beforeEach(() => {
-    handler = new ExceptionsHandler(new ExpressAdapter({}));
-    handlerMock = sinon.mock(handler);
+    handler = new ExceptionsHandler(new NoopHttpAdapter({}));
+    nextStub = sinon.stub(handler, 'next');
     routerProxy = new RouterProxy();
   });
 
@@ -23,23 +25,34 @@ describe('RouterProxy', () => {
     });
 
     it('should method encapsulate callback passed as argument', () => {
-      const expectation = handlerMock.expects('next').once();
       const proxy = routerProxy.createProxy((req, res, next) => {
-        throw new HttpException('test', 500);
+        throw httpException;
       }, handler);
       proxy(null, null, null);
-      expectation.verify();
+
+      expect(nextStub.calledOnce).to.be.true;
+      expect(
+        nextStub.calledWith(
+          httpException,
+          new ExecutionContextHost([null, null, null]),
+        ),
+      ).to.be.true;
     });
 
     it('should method encapsulate async callback passed as argument', done => {
-      const expectation = handlerMock.expects('next').once();
       const proxy = routerProxy.createProxy(async (req, res, next) => {
-        throw new HttpException('test', 500);
+        throw httpException;
       }, handler);
       proxy(null, null, null);
 
       setTimeout(() => {
-        expectation.verify();
+        expect(nextStub.calledOnce).to.be.true;
+        expect(
+          nextStub.calledWith(
+            httpException,
+            new ExecutionContextHost([null, null, null]),
+          ),
+        ).to.be.true;
         done();
       }, 0);
     });
@@ -52,29 +65,40 @@ describe('RouterProxy', () => {
     });
 
     it('should method encapsulate callback passed as argument', () => {
-      const expectation = handlerMock.expects('next').once();
       const proxy = routerProxy.createExceptionLayerProxy(
         (err, req, res, next) => {
-          throw new HttpException('test', 500);
+          throw httpException;
         },
         handler,
       );
       proxy(null, null, null, null);
-      expectation.verify();
+
+      expect(nextStub.calledOnce).to.be.true;
+      expect(
+        nextStub.calledWith(
+          httpException,
+          new ExecutionContextHost([null, null, null]),
+        ),
+      ).to.be.true;
     });
 
     it('should method encapsulate async callback passed as argument', done => {
-      const expectation = handlerMock.expects('next').once();
       const proxy = routerProxy.createExceptionLayerProxy(
         async (err, req, res, next) => {
-          throw new HttpException('test', 500);
+          throw httpException;
         },
         handler,
       );
       proxy(null, null, null, null);
 
       setTimeout(() => {
-        expectation.verify();
+        expect(nextStub.calledOnce).to.be.true;
+        expect(
+          nextStub.calledWith(
+            httpException,
+            new ExecutionContextHost([null, null, null]),
+          ),
+        ).to.be.true;
         done();
       }, 0);
     });

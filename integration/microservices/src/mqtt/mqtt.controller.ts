@@ -1,21 +1,28 @@
-import { Controller, Get, Post, Body, Query, HttpCode } from '@nestjs/common';
+import { Body, Controller, HttpCode, Post, Query } from '@nestjs/common';
 import {
   Client,
-  MessagePattern,
   ClientProxy,
+  EventPattern,
+  MessagePattern,
   Transport,
 } from '@nestjs/microservices';
-import { Observable, of, from } from 'rxjs';
+import { from, Observable, of } from 'rxjs';
 import { scan } from 'rxjs/operators';
 
 @Controller()
 export class MqttController {
+  static IS_NOTIFIED = false;
+
   @Client({ transport: Transport.MQTT })
   client: ClientProxy;
 
   @Post()
   @HttpCode(200)
-  call(@Query('command') cmd, @Body() data: number[]): Observable<number> {
+  async call(
+    @Query('command') cmd,
+    @Body() data: number[],
+  ): Promise<Observable<number>> {
+    await this.client.connect();
     return this.client.send<number>({ cmd }, data);
   }
 
@@ -29,7 +36,7 @@ export class MqttController {
 
   @Post('concurrent')
   @HttpCode(200)
-  concurrent(@Body() data: number[][]): Promise<boolean> {
+  async concurrent(@Body() data: number[][]): Promise<boolean> {
     const send = async (tab: number[]) => {
       const expected = tab.reduce((a, b) => a + b);
       const result = await this.client
@@ -39,8 +46,18 @@ export class MqttController {
       return result === expected;
     };
     return data
-      .map(async tab => await send(tab))
-      .reduce(async (a, b) => (await a) && (await b));
+      .map(async tab => send(tab))
+      .reduce(async (a, b) => (await a) && b);
+  }
+
+  @Post('notify')
+  async sendNotification(): Promise<any> {
+    return this.client.emit<number>('notification', true);
+  }
+
+  @EventPattern('notification')
+  eventHandler(data: boolean) {
+    MqttController.IS_NOTIFIED = true;
   }
 
   @MessagePattern({ cmd: 'sum' })

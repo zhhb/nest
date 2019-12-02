@@ -1,8 +1,8 @@
-import * as express from 'express';
-import * as request from 'supertest';
-import { Test } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { Transport } from '@nestjs/microservices';
+import { Test } from '@nestjs/testing';
+import { expect } from 'chai';
+import * as request from 'supertest';
 import { NatsController } from '../src/nats/nats.controller';
 
 describe('NATS transport', () => {
@@ -14,12 +14,13 @@ describe('NATS transport', () => {
       controllers: [NatsController],
     }).compile();
 
-    server = express();
-    app = module.createNestApplication(server);
+    app = module.createNestApplication();
+    server = app.getHttpAdapter().getInstance();
+
     app.connectMicroservice({
       transport: Transport.NATS,
       options: {
-        url: 'nats://localhost:4222'
+        url: 'nats://0.0.0.0:4222',
       },
     });
     await app.startAllMicroservicesAsync();
@@ -28,14 +29,14 @@ describe('NATS transport', () => {
 
   it(`/POST`, () => {
     return request(server)
-      .post('/?command=sum')
+      .post('/?command=math.sum')
       .send([1, 2, 3, 4, 5])
       .expect(200, '15');
   });
 
   it(`/POST (Promise/async)`, () => {
     return request(server)
-      .post('/?command=asyncSum')
+      .post('/?command=async.sum')
       .send([1, 2, 3, 4, 5])
       .expect(200)
       .expect(200, '15');
@@ -43,7 +44,7 @@ describe('NATS transport', () => {
 
   it(`/POST (Observable stream)`, () => {
     return request(server)
-      .post('/?command=streamSum')
+      .post('/?command=stream.sum')
       .send([1, 2, 3, 4, 5])
       .expect(200, '15');
   });
@@ -53,6 +54,45 @@ describe('NATS transport', () => {
       .post('/stream')
       .send([1, 2, 3, 4, 5])
       .expect(200, '15');
+  });
+
+  it(`/POST (concurrent)`, () => {
+    return request(server)
+      .post('/concurrent')
+      .send([
+        Array.from({ length: 10 }, (v, k) => k + 1),
+        Array.from({ length: 10 }, (v, k) => k + 11),
+        Array.from({ length: 10 }, (v, k) => k + 21),
+        Array.from({ length: 10 }, (v, k) => k + 31),
+        Array.from({ length: 10 }, (v, k) => k + 41),
+        Array.from({ length: 10 }, (v, k) => k + 51),
+        Array.from({ length: 10 }, (v, k) => k + 61),
+        Array.from({ length: 10 }, (v, k) => k + 71),
+        Array.from({ length: 10 }, (v, k) => k + 81),
+        Array.from({ length: 10 }, (v, k) => k + 91),
+      ])
+      .expect(200, 'true');
+  });
+
+  it(`/GET (exception)`, () => {
+    return request(server)
+      .get('/exception')
+      .expect(200, {
+        message: 'test',
+        status: 'error',
+      });
+  });
+
+  it(`/POST (event notification)`, done => {
+    request(server)
+      .post('/notify')
+      .send([1, 2, 3, 4, 5])
+      .end(() => {
+        setTimeout(() => {
+          expect(NatsController.IS_NOTIFIED).to.be.true;
+          done();
+        }, 1000);
+      });
   });
 
   afterEach(async () => {

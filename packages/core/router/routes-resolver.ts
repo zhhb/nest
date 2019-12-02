@@ -1,16 +1,18 @@
-import { NestContainer, InstanceWrapper } from '../injector/container';
-import { RouterProxy } from './router-proxy';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { MODULE_PATH } from '@nestjs/common/constants';
+import { HttpServer, Type } from '@nestjs/common/interfaces';
 import { Controller } from '@nestjs/common/interfaces/controllers/controller.interface';
 import { Logger } from '@nestjs/common/services/logger.service';
-import { controllerMappingMessage } from '../helpers/messages';
+import { ApplicationConfig } from '../application-config';
+import { CONTROLLER_MAPPING_MESSAGE } from '../helpers/messages';
+import { NestContainer } from '../injector/container';
+import { Injector } from '../injector/injector';
+import { InstanceWrapper } from '../injector/instance-wrapper';
+import { MetadataScanner } from '../metadata-scanner';
 import { Resolver } from './interfaces/resolver.interface';
 import { RouterExceptionFilters } from './router-exception-filters';
-import { MetadataScanner } from '../metadata-scanner';
 import { RouterExplorer } from './router-explorer';
-import { ApplicationConfig } from './../application-config';
-import { NotFoundException, BadRequestException } from '@nestjs/common';
-import { MODULE_PATH } from '@nestjs/common/constants';
-import { HttpServer } from '@nestjs/common/interfaces';
+import { RouterProxy } from './router-proxy';
 
 export class RoutesResolver implements Resolver {
   private readonly logger = new Logger(RoutesResolver.name, true);
@@ -21,74 +23,79 @@ export class RoutesResolver implements Resolver {
   constructor(
     private readonly container: NestContainer,
     private readonly config: ApplicationConfig,
+    private readonly injector: Injector,
   ) {
     this.routerExceptionsFilter = new RouterExceptionFilters(
       container,
       config,
-      container.getApplicationRef(),
+      container.getHttpAdapterRef(),
     );
+    const metadataScanner = new MetadataScanner();
     this.routerBuilder = new RouterExplorer(
-      new MetadataScanner(),
+      metadataScanner,
       this.container,
+      this.injector,
       this.routerProxy,
       this.routerExceptionsFilter,
       this.config,
     );
   }
 
-  public resolve(appInstance, basePath: string) {
+  public resolve<T extends HttpServer>(applicationRef: T, basePath: string) {
     const modules = this.container.getModules();
-    modules.forEach(({ routes, metatype }, moduleName) => {
+    modules.forEach(({ controllers, metatype }, moduleName) => {
       let path = metatype
         ? Reflect.getMetadata(MODULE_PATH, metatype)
         : undefined;
-      path = path ? path + basePath : basePath;
-      this.registerRouters(routes, moduleName, path, appInstance);
+      path = path ? basePath + path : basePath;
+      this.registerRouters(controllers, moduleName, path, applicationRef);
     });
-    this.registerNotFoundHandler();
-    this.registerExceptionHandler();
   }
 
   public registerRouters(
     routes: Map<string, InstanceWrapper<Controller>>,
     moduleName: string,
     basePath: string,
-    appInstance: HttpServer,
+    applicationRef: HttpServer,
   ) {
-    routes.forEach(({ instance, metatype }) => {
-      const path = this.routerBuilder.extractRouterPath(metatype, basePath);
+    routes.forEach(instanceWrapper => {
+      const { metatype } = instanceWrapper;
+      const path = this.routerBuilder.extractRouterPath(
+        metatype as Type<any>,
+        basePath,
+      );
       const controllerName = metatype.name;
 
-      this.logger.log(controllerMappingMessage(controllerName, path));
+      this.logger.log(CONTROLLER_MAPPING_MESSAGE(controllerName, path));
       this.routerBuilder.explore(
-        instance,
-        metatype,
+        instanceWrapper,
         moduleName,
-        appInstance,
+        applicationRef,
         path,
       );
     });
   }
 
   public registerNotFoundHandler() {
-    const applicationRef = this.container.getApplicationRef();
-    const callback = (req, res) => {
+    const applicationRef = this.container.getHttpAdapterRef();
+    const callback = <TRequest, TResponse>(req: TRequest, res: TResponse) => {
       const method = applicationRef.getRequestMethod(req);
       const url = applicationRef.getRequestUrl(req);
       throw new NotFoundException(`Cannot ${method} ${url}`);
     };
-    const handler = this.routerExceptionsFilter.create(
-      {},
-      callback as any,
-      undefined,
-    );
+    const handler = this.routerExceptionsFilter.create({}, callback, undefined);
     const proxy = this.routerProxy.createProxy(callback, handler);
     applicationRef.setNotFoundHandler &&
       applicationRef.setNotFoundHandler(proxy);
   }
 
   public registerExceptionHandler() {
-    const callback = (err, req, res, next) => {
+    const callback = <TError, TRequest, TResponse>(
+      err: TError,
+      req: TRequest,
+      res: TResponse,
+      next: Function,
+    ) => {
       throw this.mapExternalException(err);
     };
     const handler = this.routerExceptionsFilter.create(
@@ -97,7 +104,7 @@ export class RoutesResolver implements Resolver {
       undefined,
     );
     const proxy = this.routerProxy.createExceptionLayerProxy(callback, handler);
-    const applicationRef = this.container.getApplicationRef();
+    const applicationRef = this.container.getHttpAdapterRef();
     applicationRef.setErrorHandler && applicationRef.setErrorHandler(proxy);
   }
 

@@ -1,66 +1,72 @@
-import * as net from 'net';
-import * as JsonSocket from 'json-socket';
-import { ClientProxy } from './client-proxy';
-import {
-  ClientOptions,
-  TcpClientOptions,
-} from '../interfaces/client-metadata.interface';
 import { Logger } from '@nestjs/common';
+import * as net from 'net';
+import { share, tap } from 'rxjs/operators';
 import {
-  TCP_DEFAULT_PORT,
-  TCP_DEFAULT_HOST,
-  CONNECT_EVENT,
-  MESSAGE_EVENT,
-  ERROR_EVENT,
   CLOSE_EVENT,
-} from './../constants';
-import { WritePacket, ReadPacket, PacketId } from './../interfaces';
-import { tap } from 'rxjs/operators';
+  ERROR_EVENT,
+  MESSAGE_EVENT,
+  TCP_DEFAULT_HOST,
+  TCP_DEFAULT_PORT,
+} from '../constants';
+import { JsonSocket } from '../helpers/json-socket';
+import { PacketId, ReadPacket, WritePacket } from '../interfaces';
+import { TcpClientOptions } from '../interfaces/client-metadata.interface';
+import { ClientProxy } from './client-proxy';
 import { ECONNREFUSED } from './constants';
 
 export class ClientTCP extends ClientProxy {
+  protected connection: Promise<any>;
   private readonly logger = new Logger(ClientTCP.name);
   private readonly port: number;
   private readonly host: string;
   private isConnected = false;
   private socket: JsonSocket;
 
-  constructor(options: ClientOptions) {
+  constructor(options: TcpClientOptions['options']) {
     super();
-    this.port =
-      this.getOptionsProp<TcpClientOptions>(options, 'port') ||
-      TCP_DEFAULT_PORT;
-    this.host =
-      this.getOptionsProp<TcpClientOptions>(options, 'host') ||
-      TCP_DEFAULT_HOST;
+    this.port = this.getOptionsProp(options, 'port') || TCP_DEFAULT_PORT;
+    this.host = this.getOptionsProp(options, 'host') || TCP_DEFAULT_HOST;
+
+    this.initializeSerializer(options);
+    this.initializeDeserializer(options);
   }
 
   public connect(): Promise<any> {
+    if (this.isConnected && this.connection) {
+      return this.connection;
+    }
     this.socket = this.createSocket();
-    return new Promise((resolve, reject) => {
-      this.bindEvents(this.socket);
-      this.connect$(this.socket._socket)
-        .pipe(tap(() => (this.isConnected = true)))
-        .subscribe(resolve, reject);
+    this.bindEvents(this.socket);
 
-      this.socket.connect(this.port, this.host);
-    });
+    const source$ = this.connect$(this.socket.netSocket).pipe(
+      tap(() => {
+        this.isConnected = true;
+        this.socket.on(MESSAGE_EVENT, (buffer: WritePacket & PacketId) =>
+          this.handleResponse(buffer),
+        );
+      }),
+      share(),
+    );
+
+    this.socket.connect(this.port, this.host);
+    this.connection = source$.toPromise();
+    return this.connection;
   }
 
-  public handleResponse(
-    socket: JsonSocket,
-    callback: (packet: WritePacket) => any,
-    buffer: WritePacket,
-    context: Function,
-  ) {
-    const { err, response, isDisposed } = buffer;
+  public handleResponse(buffer: unknown): void {
+    const { err, response, isDisposed, id } = this.deserializer.deserialize(
+      buffer,
+    );
+    const callback = this.routingMap.get(id);
+    if (!callback) {
+      return undefined;
+    }
     if (isDisposed || err) {
-      callback({
+      return callback({
         err,
-        response: null,
+        response,
         isDisposed: true,
       });
-      return socket._socket.removeListener(MESSAGE_EVENT, context);
     }
     callback({
       err,
@@ -80,7 +86,7 @@ export class ClientTCP extends ClientProxy {
   public bindEvents(socket: JsonSocket) {
     socket.on(
       ERROR_EVENT,
-      err => err.code !== ECONNREFUSED && this.handleError(err),
+      (err: any) => err.code !== ECONNREFUSED && this.handleError(err),
     );
     socket.on(CLOSE_EVENT, () => this.handleClose());
   }
@@ -94,28 +100,29 @@ export class ClientTCP extends ClientProxy {
     this.socket = null;
   }
 
-  protected async publish(
+  protected publish(
     partialPacket: ReadPacket,
     callback: (packet: WritePacket) => any,
-  ) {
+  ): Function {
     try {
-      if (!this.isConnected) {
-        await this.connect();
-      }
-      const handleRequestResponse = (jsonSocket: JsonSocket) => {
-        const packet = this.assignPacketId(partialPacket);
-        jsonSocket.sendMessage(packet);
-        const listener = (buffer: WritePacket & PacketId) => {
-          if (buffer.id !== packet.id) {
-            return undefined;
-          }
-          this.handleResponse(jsonSocket, callback, buffer, listener);
-        };
-        jsonSocket.on(MESSAGE_EVENT, listener);
-      };
-      handleRequestResponse(this.socket);
+      const packet = this.assignPacketId(partialPacket);
+      const serializedPacket = this.serializer.serialize(packet);
+
+      this.routingMap.set(packet.id, callback);
+      this.socket.sendMessage(serializedPacket);
+
+      return () => this.routingMap.delete(packet.id);
     } catch (err) {
       callback({ err });
     }
+  }
+
+  protected async dispatchEvent(packet: ReadPacket): Promise<any> {
+    const pattern = this.normalizePattern(packet.pattern);
+    const serializedPacket = this.serializer.serialize({
+      ...packet,
+      pattern,
+    });
+    return this.socket.sendMessage(serializedPacket);
   }
 }

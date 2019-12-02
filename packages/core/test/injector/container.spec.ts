@@ -1,9 +1,12 @@
 import { expect } from 'chai';
 import * as sinon from 'sinon';
-import { NestContainer } from '../../injector/container';
 import { Module } from '../../../common/decorators/modules/module.decorator';
-import { UnknownModuleException } from '../../errors/exceptions/unknown-module.exception';
 import { Global } from '../../../common/index';
+import { CircularDependencyException } from '../../errors/exceptions/circular-dependency.exception';
+import { UnknownModuleException } from '../../errors/exceptions/unknown-module.exception';
+import { NestContainer } from '../../injector/container';
+import { InternalCoreModule } from '../../injector/internal-core-module';
+import { NoopHttpAdapter } from '../utils/noop-adapter.spec';
 
 describe('NestContainer', () => {
   let container: NestContainer;
@@ -19,9 +22,15 @@ describe('NestContainer', () => {
     container = new NestContainer();
   });
 
-  it('should "addComponent" throw "UnknownModuleException" when module is not stored in collection', () => {
-    expect(() => container.addComponent(null, 'TestModule')).throw(
+  it('should "addProvider" throw "UnknownModuleException" when module is not stored in collection', () => {
+    expect(() => container.addProvider({} as any, 'TestModule')).throw(
       UnknownModuleException,
+    );
+  });
+
+  it('should "addProvider" throw "CircularDependencyException" when provider is nil', () => {
+    expect(() => container.addProvider(null, 'TestModule')).throw(
+      CircularDependencyException,
     );
   });
 
@@ -31,14 +40,14 @@ describe('NestContainer', () => {
     );
   });
 
-  it('should "addExportedComponent" throw "UnknownModuleException" when module is not stored in collection', () => {
-    expect(() => container.addExportedComponent(null, 'TestModule')).throw(
+  it('should "addExportedProvider" throw "UnknownModuleException" when module is not stored in collection', () => {
+    expect(() => container.addExportedProvider(null, 'TestModule')).throw(
       UnknownModuleException,
     );
   });
 
   it('should "addInjectable" throw "UnknownModuleException" when module is not stored in collection', () => {
-    expect(() => container.addInjectable(null, 'TestModule')).throw(
+    expect(() => container.addInjectable(null, 'TestModule', null)).throw(
       UnknownModuleException,
     );
   });
@@ -52,24 +61,24 @@ describe('NestContainer', () => {
   });
 
   describe('addModule', () => {
-    it('should not add module if already exists in collection', () => {
+    it('should not add module if already exists in collection', async () => {
       const modules = new Map();
       const setSpy = sinon.spy(modules, 'set');
       (container as any).modules = modules;
 
-      container.addModule(TestModule as any, []);
-      container.addModule(TestModule as any, []);
+      await container.addModule(TestModule as any, []);
+      await container.addModule(TestModule as any, []);
 
       expect(setSpy.calledOnce).to.be.true;
     });
 
     it('should throws an exception when metatype is not defined', () => {
-      expect(() => container.addModule(undefined, [])).to.throws();
+      expect(container.addModule(undefined, [])).to.eventually.throws();
     });
 
-    it('should add global module when module is global', () => {
+    it('should add global module when module is global', async () => {
       const addGlobalModuleSpy = sinon.spy(container, 'addGlobalModule');
-      container.addModule(GlobalTestModule as any, []);
+      await container.addModule(GlobalTestModule as any, []);
       expect(addGlobalModuleSpy.calledOnce).to.be.true;
     });
   });
@@ -86,7 +95,7 @@ describe('NestContainer', () => {
     });
   });
 
-  describe('bindGlobalsToRelatedModules', () => {
+  describe('bindGlobalsToImports', () => {
     it('should call "bindGlobalModuleToModule" for every global module', () => {
       const global1 = { test: 1 };
       const global2 = { test: 2 };
@@ -98,7 +107,7 @@ describe('NestContainer', () => {
         container,
         'bindGlobalModuleToModule',
       );
-      container.bindGlobalsToRelatedModules({
+      container.bindGlobalsToImports({
         addRelatedModule: sinon.spy(),
       } as any);
       expect(bindGlobalModuleToModuleSpy.calledTwice).to.be.true;
@@ -164,6 +173,48 @@ describe('NestContainer', () => {
         container.addDynamicModules([Test] as any, []);
         expect(addModuleSpy.called).to.be.true;
       });
+    });
+  });
+
+  describe('get applicationConfig', () => {
+    it('should return ApplicationConfig instance', () => {
+      expect(container.applicationConfig).to.be.eql(
+        (container as any)._applicationConfig,
+      );
+    });
+  });
+
+  describe('setHttpAdapter', () => {
+    it('should set http adapter', () => {
+      const httpAdapter = new NoopHttpAdapter({});
+      container.setHttpAdapter(httpAdapter);
+
+      const internalStorage = (container as any).internalProvidersStorage;
+      expect(internalStorage.httpAdapter).to.be.eql(httpAdapter);
+    });
+  });
+
+  describe('getModuleByKey', () => {
+    it('should return module by passed key', () => {
+      const key = 'test';
+      const value = {};
+      container.getModules().set(key, value as any);
+
+      expect(container.getModuleByKey(key)).to.be.eql(value);
+    });
+  });
+
+  describe('createCoreModule', () => {
+    it('should create InternalCoreModule', () => {
+      expect(container.createCoreModule().module).to.be.eql(InternalCoreModule);
+    });
+  });
+
+  describe('registerCoreModuleRef', () => {
+    it('should register core module ref', () => {
+      const ref = {} as any;
+      container.registerCoreModuleRef(ref);
+      expect((container as any).internalCoreModule).to.be.eql(ref);
     });
   });
 });

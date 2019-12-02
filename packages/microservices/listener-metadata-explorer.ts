@@ -1,14 +1,34 @@
 import { Controller } from '@nestjs/common/interfaces/controllers/controller.interface';
 import { isFunction, isUndefined } from '@nestjs/common/utils/shared.utils';
+import { MetadataScanner } from '@nestjs/core/metadata-scanner';
 import {
-  PATTERN_METADATA,
-  PATTERN_HANDLER_METADATA,
   CLIENT_CONFIGURATION_METADATA,
   CLIENT_METADATA,
+  PATTERN_HANDLER_METADATA,
+  PATTERN_METADATA,
+  REQUEST_PATTERN_METADATA,
+  REPLY_PATTERN_METADATA,
 } from './constants';
-import { PatternMetadata } from './interfaces/pattern-metadata.interface';
+import { PatternHandler } from './enums/pattern-handler.enum';
 import { ClientOptions } from './interfaces/client-metadata.interface';
-import { MetadataScanner } from '@nestjs/core/metadata-scanner';
+import { PatternMetadata } from './interfaces/pattern-metadata.interface';
+
+export interface ClientProperties {
+  property: string;
+  metadata: ClientOptions;
+}
+
+export interface PatternProperties {
+  pattern: PatternMetadata;
+  methodKey: string;
+  isEventHandler: boolean;
+  targetCallback: (...args: any[]) => any;
+}
+
+export interface MessageRequestProperties {
+  requestPattern: PatternMetadata;
+  replyPattern: PatternMetadata;
+}
 
 export class ListenerMetadataExplorer {
   constructor(private readonly metadataScanner: MetadataScanner) {}
@@ -19,28 +39,28 @@ export class ListenerMetadataExplorer {
       Controller,
       PatternProperties
     >(instance, instancePrototype, method =>
-      this.exploreMethodMetadata(instance, instancePrototype, method),
+      this.exploreMethodMetadata(instancePrototype, method),
     );
   }
 
   public exploreMethodMetadata(
-    instance,
-    instancePrototype,
-    methodName: string,
+    instancePrototype: any,
+    methodKey: string,
   ): PatternProperties {
-    const targetCallback = instancePrototype[methodName];
-    const isPattern = Reflect.getMetadata(
+    const targetCallback = instancePrototype[methodKey];
+    const handlerType = Reflect.getMetadata(
       PATTERN_HANDLER_METADATA,
       targetCallback,
     );
-
-    if (isUndefined(isPattern)) {
-      return null;
+    if (isUndefined(handlerType)) {
+      return;
     }
     const pattern = Reflect.getMetadata(PATTERN_METADATA, targetCallback);
     return {
+      methodKey,
       targetCallback,
       pattern,
+      isEventHandler: handlerType === PatternHandler.EVENT,
     };
   }
 
@@ -48,12 +68,14 @@ export class ListenerMetadataExplorer {
     instance: Controller,
   ): IterableIterator<ClientProperties> {
     for (const propertyKey in instance) {
-      if (isFunction(propertyKey)) continue;
-
+      if (isFunction(propertyKey)) {
+        continue;
+      }
       const property = String(propertyKey);
       const isClient = Reflect.getMetadata(CLIENT_METADATA, instance, property);
-      if (isUndefined(isClient)) continue;
-
+      if (isUndefined(isClient)) {
+        continue;
+      }
       const metadata = Reflect.getMetadata(
         CLIENT_CONFIGURATION_METADATA,
         instance,
@@ -62,14 +84,4 @@ export class ListenerMetadataExplorer {
       yield { property, metadata };
     }
   }
-}
-
-export interface ClientProperties {
-  property: string;
-  metadata: ClientOptions;
-}
-
-export interface PatternProperties {
-  pattern: PatternMetadata;
-  targetCallback: (...args) => any;
 }

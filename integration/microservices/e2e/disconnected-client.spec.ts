@@ -1,10 +1,8 @@
-import * as express from 'express';
-import * as request from 'supertest';
-import { Test } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
-import { join } from 'path';
-import { DisconnectedClientController } from '../src/disconnected.controller';
 import { Transport } from '@nestjs/microservices';
+import { Test } from '@nestjs/testing';
+import * as request from 'supertest';
+import { DisconnectedClientController } from '../src/disconnected.controller';
 
 describe('Disconnected client', () => {
   let server;
@@ -15,8 +13,9 @@ describe('Disconnected client', () => {
       controllers: [DisconnectedClientController],
     }).compile();
 
-    server = express();
-    app = module.createNestApplication(server);
+    app = module.createNestApplication();
+    server = app.getHttpAdapter().getInstance();
+
     await app.init();
   });
 
@@ -48,6 +47,19 @@ describe('Disconnected client', () => {
         transport: Transport.NATS,
         options: {
           url: 'nats://localhost:4224',
+        },
+      })
+      .expect(408);
+  });
+
+  it(`MQTT`, () => {
+    return request(server)
+      .post('/')
+      .send({
+        transport: Transport.MQTT,
+        options: {
+          host: 'mqtt://broker.hivemq.com',
+          port: 183,
         },
       })
       .expect(408);

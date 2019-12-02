@@ -2,18 +2,22 @@ import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
 import { IRouteParamsFactory } from './interfaces/route-params-factory.interface';
 
 export class RouteParamsFactory implements IRouteParamsFactory {
-  public exchangeKeyForValue(
+  public exchangeKeyForValue<
+    TRequest extends Record<string, any> = any,
+    TResponse = any,
+    TResult = any
+  >(
     key: RouteParamtypes | string,
-    data,
-    { req, res, next },
-  ) {
+    data: string | object | any,
+    { req, res, next }: { req: TRequest; res: TResponse; next: Function },
+  ): TResult {
     switch (key) {
       case RouteParamtypes.NEXT:
-        return next;
+        return next as any;
       case RouteParamtypes.REQUEST:
-        return req;
+        return req as any;
       case RouteParamtypes.RESPONSE:
-        return res;
+        return res as any;
       case RouteParamtypes.BODY:
         return data && req.body ? req.body[data] : req.body;
       case RouteParamtypes.PARAM:
@@ -25,9 +29,11 @@ export class RouteParamsFactory implements IRouteParamsFactory {
       case RouteParamtypes.SESSION:
         return req.session;
       case RouteParamtypes.FILE:
-        return req.file;
+        return req[data || 'file'];
       case RouteParamtypes.FILES:
         return req.files;
+      case RouteParamtypes.IP:
+        return req.ip;
       default:
         return null;
     }
